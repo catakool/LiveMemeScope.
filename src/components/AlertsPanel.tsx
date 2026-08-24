@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CoinRecord, CoinScores, AlertMetric, AlertRule, AlertEvent } from "@/lib/types";
+import { AlertMetric, AlertRule, AlertEvent } from "@/lib/types";
+import { DiscoveryRecord } from "@/lib/discovery";
 import {
   getAlertRules,
   saveAlertRule,
@@ -23,9 +24,10 @@ const METRICS: { value: AlertMetric; label: string; unit: string }[] = [
   { value: "opportunity_score_change", label: "Alteração no Opportunity Score superior a", unit: "pontos" },
   { value: "risk_score_above", label: "Risk Score superior a", unit: "pontos" },
   { value: "whale_movement", label: "Movimentação anormal de grandes detentores", unit: "" },
+  { value: "opportunity_signal", label: "Novo sinal do Opportunity Engine (Watch ou superior)", unit: "" },
 ];
 
-export default function AlertsPanel({ records }: { records: (CoinRecord & { scores: CoinScores })[] }) {
+export default function AlertsPanel({ records }: { records: DiscoveryRecord[] }) {
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [events, setEvents] = useState<AlertEvent[]>([]);
   const [coinId, setCoinId] = useState(records[0]?.def.coingeckoId ?? "");
@@ -34,6 +36,7 @@ export default function AlertsPanel({ records }: { records: (CoinRecord & { scor
   const [notifStatus, setNotifStatus] = useState<NotificationPermission>("default");
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hidratação a partir de localStorage/Notification, só existe no cliente
     setRules(getAlertRules());
     setEvents(getAlertEvents());
     if (typeof window !== "undefined" && "Notification" in window) {
@@ -44,6 +47,7 @@ export default function AlertsPanel({ records }: { records: (CoinRecord & { scor
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- escolhe uma moeda por omissão assim que a lista chega da API
     if (!coinId && records[0]) setCoinId(records[0].def.coingeckoId);
   }, [records, coinId]);
 
@@ -101,7 +105,7 @@ export default function AlertsPanel({ records }: { records: (CoinRecord & { scor
             value={threshold}
             onChange={(e) => setThreshold(Number(e.target.value))}
             className="w-full bg-[var(--surface-2)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-sm focus-ring outline-none"
-            disabled={metric === "whale_movement"}
+            disabled={metric === "whale_movement" || metric === "opportunity_signal"}
           />
           <button
             onClick={addRule}
@@ -125,7 +129,7 @@ export default function AlertsPanel({ records }: { records: (CoinRecord & { scor
               >
                 <span className={r.enabled ? "" : "opacity-40"}>
                   <span className="font-data font-semibold">{coin?.def.symbol ?? r.coinId}</span> ·{" "}
-                  {metricLabel(r.metric)} {r.metric !== "whale_movement" ? r.threshold : ""}
+                  {metricLabel(r.metric)} {r.metric !== "whale_movement" && r.metric !== "opportunity_signal" ? r.threshold : ""}
                 </span>
                 <span className="flex items-center gap-2">
                   <button

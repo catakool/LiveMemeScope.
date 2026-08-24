@@ -7,9 +7,11 @@ import { evaluateAlerts } from "@/lib/alerts";
 
 export interface CoinsApiResponse {
   records: DiscoveryRecord[];
+  liveOpportunities: DiscoveryRecord[];
   universeSize: number;
   generatedAt: string;
   meta: { coingecko: SourceMeta };
+  storage?: "redis" | "memory";
   error?: string;
 }
 
@@ -41,6 +43,7 @@ export function useCoins() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- inicia o polling; load() atualiza estado a partir de uma fonte externa (a API)
     load();
     timerRef.current = setInterval(load, POLL_MS);
     return () => {

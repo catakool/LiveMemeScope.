@@ -99,7 +99,7 @@ export async function getMarkets(
       for (const c of raw) data[c.id] = mapCoin(c);
       cacheSet(key, data, MARKETS_TTL_MS);
       return { data, meta: toSourceMeta(Date.now(), true) };
-    } catch (err) {
+    } catch {
       const stale = cacheGetStale<Record<string, MarketData>>(key);
       if (stale) {
         return { data: stale.value, meta: toSourceMeta(stale.storedAt, false) };

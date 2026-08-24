@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { CoinScores, DexPairData, MarketData, TokenDefinition, SourceMeta } from "@/lib/types";
 import { MarketChart } from "@/lib/coingecko";
+import { OpportunityResult } from "@/lib/opportunity";
+import { StoredSignal } from "@/lib/storage";
 import { formatUsd, formatPercent, formatDateTime } from "@/lib/format";
 import { TIER_META, CHAIN_LABEL } from "@/lib/tiers";
 import PriceChart from "./PriceChart";
@@ -11,6 +13,7 @@ import RiskRadar from "./RiskRadar";
 import ScoreBreakdown from "./ScoreBreakdown";
 import DataStatusBadge from "./DataStatusBadge";
 import Disclaimer from "./Disclaimer";
+import OpportunityBadge from "./OpportunityBadge";
 
 interface DetailResponse {
   def: TokenDefinition;
@@ -18,6 +21,8 @@ interface DetailResponse {
   dex: DexPairData | null;
   chart: MarketChart | null;
   scores: CoinScores;
+  opportunity: OpportunityResult | null;
+  signals: StoredSignal[];
   meta: { coingecko: SourceMeta; dexscreener: SourceMeta; chart: SourceMeta };
 }
 
@@ -35,6 +40,7 @@ export default function CoinDetailModal({ coinId, onClose }: { coinId: string; o
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- inicia o fetch ao mudar de moeda/intervalo; o resultado chega no callback
     setLoading(true);
     fetch(`/api/coins/${coinId}?days=${days}`)
       .then((r) => r.json())
@@ -142,8 +148,82 @@ export default function CoinDetailModal({ coinId, onClose }: { coinId: string; o
                 </div>
               </div>
 
+              {data.opportunity && data.opportunity.total !== null ? (
+                <div className="rounded-xl border border-[var(--accent-gold)]/40 bg-[var(--surface)] p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-display font-semibold text-sm">Opportunity Engine</h3>
+                    <div className="flex items-center gap-2">
+                      <span className="font-data text-lg font-bold text-[var(--accent-gold)]">{data.opportunity.total}/100</span>
+                      <OpportunityBadge classification={data.opportunity.classification} />
+                    </div>
+                  </div>
+                  <p className="text-xs text-[var(--text-faint)]">
+                    Confiança: {(data.opportunity.confidence * 100).toFixed(0)}%. Identifica condições de mercado que
+                    historicamente podem associar-se a momentum — não prevê o futuro nem garante lucros.
+                  </p>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div>
+                      <span className="text-[var(--text-faint)]">5m</span>
+                      <div className="font-data">{formatPercent(data.opportunity.metrics.change5m)}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--text-faint)]">15m</span>
+                      <div className="font-data">{formatPercent(data.opportunity.metrics.change15m)}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--text-faint)]">1h</span>
+                      <div className="font-data">{formatPercent(data.opportunity.metrics.change1h)}</div>
+                    </div>
+                  </div>
+                  {data.opportunity.reasons.length > 0 && (
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wide text-[var(--text-faint)]">Why now?</span>
+                      <ul className="mt-1 space-y-0.5">
+                        {data.opportunity.reasons.map((r, i) => (
+                          <li key={i} className="text-xs text-[var(--text-muted)]">
+                            • {r}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {data.opportunity.risks.length > 0 && (
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wide text-[var(--accent-risk)]">Risk</span>
+                      <ul className="mt-1 space-y-0.5">
+                        {data.opportunity.risks.map((r, i) => (
+                          <li key={i} className="text-xs text-[var(--accent-risk)]">
+                            • {r}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 text-xs text-[var(--text-muted)]">
+                  Opportunity Engine: ainda sem histórico suficiente para esta moeda. O job de monitorização precisa de
+                  acumular alguns snapshots antes de conseguir calcular aceleração.
+                </div>
+              )}
+
+              {data.signals.length > 0 && (
+                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
+                  <h3 className="font-display font-semibold text-sm mb-2">Histórico de sinais</h3>
+                  <ul className="space-y-1.5 max-h-40 overflow-y-auto">
+                    {data.signals.map((s) => (
+                      <li key={s.id} className="flex items-center justify-between text-xs">
+                        <span className="text-[var(--text-muted)]">{formatDateTime(s.timestamp)}</span>
+                        <OpportunityBadge classification={s.classification} />
+                        <span className="font-data">{s.opportunityScore ?? "N/D"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               <div className="grid md:grid-cols-2 gap-4">
-                <ScoreBreakdown title="Opportunity Score" result={data.scores.opportunity} accent="var(--accent-opportunity)" />
+                <ScoreBreakdown title="Opportunity Score (Discovery)" result={data.scores.opportunity} accent="var(--accent-opportunity)" />
                 <ScoreBreakdown title="Risk Score" result={data.scores.risk} accent="var(--accent-risk)" />
               </div>
 

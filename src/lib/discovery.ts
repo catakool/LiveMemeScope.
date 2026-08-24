@@ -1,4 +1,4 @@
-import { CoinRecord, DiscoveryReason, MarketData, RiskTier, TokenDefinition } from "./types";
+import { CoinRecord, DiscoveryReason, RiskTier, TokenDefinition } from "./types";
 import {
   getMemeCategoryMarkets,
   getTrendingIds,
@@ -7,6 +7,7 @@ import {
 } from "./coingecko";
 import { getDexDataByAddress } from "./dexscreener";
 import { computeScores } from "./scoring";
+import { OpportunityResult } from "./opportunity";
 
 // ---------------------------------------------------------------------------
 // MemeScope Discovery Engine
@@ -31,6 +32,14 @@ export interface DiscoveryRecord extends CoinRecord {
     rankScore: number; // usado só para ordenar a lista, não é mostrado como "verdade absoluta"
     trendingScore: number | null; // posição/pontuação do /search/trending, se aplicável
   };
+  /**
+   * Resultado do Opportunity Engine (lib/opportunity.ts), calculado a partir
+   * do histórico de snapshots já guardado pelo job de monitorização.
+   * `null` enquanto não houver histórico suficiente para este token.
+   * Campo opcional/aditivo — não quebra nenhum consumidor existente que
+   * ainda não o conheça.
+   */
+  opportunity?: OpportunityResult | null;
 }
 
 export function deriveRiskTier(marketCap: number | null): RiskTier {
@@ -47,7 +56,7 @@ function daysSince(iso: string | null): number | null {
   return d >= 0 ? d : null;
 }
 
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let i = 0;
   async function worker() {

@@ -2,10 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { getMarkets, getMarketChart, getCoinPlatformDetail } from "@/lib/coingecko";
 import { getDexDataByAddress } from "@/lib/dexscreener";
 import { computeScores } from "@/lib/scoring";
+import { computeOpportunity } from "@/lib/opportunity";
 import { deriveRiskTier } from "@/lib/discovery";
+import { getStorage, watchedTokenKey } from "@/lib/storage";
 import { TokenDefinition } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
+const OPPORTUNITY_SNAPSHOT_LOOKBACK_MS = 90 * 60_000;
 
 export async function GET(
   req: NextRequest,
@@ -45,12 +48,28 @@ export async function GET(
     note: "Nível de risco estimado por capitalização de mercado (heurística), não substitui o Risk Score detalhado abaixo.",
   };
 
+  const storage = getStorage();
+  const key = watchedTokenKey({ chain: def.chain, address: def.contractAddress, coingeckoId: id });
+  let opportunity = null;
+  try {
+    const snapshots = await storage.getRecentSnapshots(key, Date.now() - OPPORTUNITY_SNAPSHOT_LOOKBACK_MS);
+    if (snapshots.length > 0) {
+      opportunity = computeOpportunity(snapshots, market, dexRes.data, []);
+    }
+  } catch {
+    opportunity = null;
+  }
+
+  const signals = await storage.getRecentSignals(key, 20).catch(() => []);
+
   return NextResponse.json({
     def,
     market,
     dex: dexRes.data,
     chart: chartRes.data,
     scores,
+    opportunity,
+    signals,
     meta: {
       coingecko: cgMeta,
       dexscreener: dexRes.meta,

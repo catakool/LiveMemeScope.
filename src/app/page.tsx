@@ -15,6 +15,7 @@ import PerformanceCompare from "@/components/PerformanceCompare";
 import AlertsPanel from "@/components/AlertsPanel";
 import AddTokenPanel from "@/components/AddTokenPanel";
 import CoinDetailModal from "@/components/CoinDetailModal";
+import LiveOpportunities from "@/components/LiveOpportunities";
 
 type ViewMode = "cards" | "table";
 
@@ -26,10 +27,11 @@ export default function Home() {
   const [openCoin, setOpenCoin] = useState<string | null>(null);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hidratação intencional de localStorage após o mount (não existe no servidor)
     setWatchlist(getWatchlist());
   }, []);
 
-  const records = data?.records ?? [];
+  const records = useMemo(() => data?.records ?? [], [data]);
 
   const filtered = useMemo(() => {
     return records.filter((r) => {
@@ -75,6 +77,8 @@ export default function Home() {
             </div>
 
             <MarketSummary records={records} />
+
+            <LiveOpportunities records={data.liveOpportunities} onOpen={setOpenCoin} />
 
             <Filters value={filters} onChange={setFilters} />
 

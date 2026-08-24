@@ -20,6 +20,8 @@ export default function AddTokenPanel() {
   const [custom, setCustom] = useState<CustomToken[]>(
     typeof window !== "undefined" ? getCustomTokens() : []
   );
+  const [registering, setRegistering] = useState(false);
+  const [registerError, setRegisterError] = useState<string | null>(null);
 
   const verify = async () => {
     setLoading(true);
@@ -39,20 +41,46 @@ export default function AddTokenPanel() {
     }
   };
 
-  const confirmAdd = () => {
+  const confirmAdd = async () => {
     if (!result?.found || !result.dex) return;
-    const token: CustomToken = {
-      coingeckoId: null,
-      address,
-      chain: result.dex.chain,
-      symbolHint: label || "Token personalizado",
-      addedAt: new Date().toISOString(),
-      verifiedByUser: true,
-    };
-    setCustom(addCustomToken(token));
-    setResult(null);
-    setAddress("");
-    setLabel("");
+    setRegistering(true);
+    setRegisterError(null);
+    try {
+      const res = await fetch("/api/tokens/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address,
+          chain: result.dex.chain,
+          symbol: label || "TOKEN",
+          name: label || undefined,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setRegisterError(json?.error ?? "Não foi possível registar o token no servidor.");
+        return;
+      }
+
+      // localStorage continua a servir só como lista pessoal de conveniência —
+      // a fonte de verdade dos dados é agora o registo no servidor (acima).
+      const token: CustomToken = {
+        coingeckoId: null,
+        address,
+        chain: result.dex.chain,
+        symbolHint: label || "Token personalizado",
+        addedAt: new Date().toISOString(),
+        verifiedByUser: true,
+      };
+      setCustom(addCustomToken(token));
+      setResult(null);
+      setAddress("");
+      setLabel("");
+    } catch {
+      setRegisterError("Falha ao contactar o servidor. Tente novamente.");
+    } finally {
+      setRegistering(false);
+    }
   };
 
   return (
@@ -98,10 +126,16 @@ export default function AddTokenPanel() {
               </div>
               <button
                 onClick={confirmAdd}
-                className="px-3 py-1.5 rounded-lg bg-[var(--accent-opportunity)] text-[#062421] font-medium focus-ring"
+                disabled={registering}
+                className="px-3 py-1.5 rounded-lg bg-[var(--accent-opportunity)] text-[#062421] font-medium disabled:opacity-50 focus-ring"
               >
-                Confirmo que verifiquei a origem — adicionar à watchlist
+                {registering ? "A registar…" : "Confirmo que verifiquei a origem — adicionar à watchlist"}
               </button>
+              {registerError && <p className="text-[var(--accent-risk)]">{registerError}</p>}
+              <p className="text-[10px] text-[var(--text-faint)]">
+                O token fica registado no servidor e passa a acumular histórico (preço, volume, liquidez) a cada
+                execução do job de monitorização, o que alimenta o Opportunity Engine e os alertas.
+              </p>
             </>
           )}
         </div>

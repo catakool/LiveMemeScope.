@@ -64,6 +64,22 @@ export interface DexPairData {
   txns24h: { buys: number | null; sells: number | null };
   pairCreatedAt: string | null; // ISO
   fdv: number | null;
+  /**
+   * Campos adicionais de curto prazo, adicionados para suportar o Opportunity
+   * Engine. Todos opcionais e `null` quando a DexScreener não os fornece —
+   * nunca inventados. Mantidos à parte dos campos "clássicos" acima (h24)
+   * para não quebrar nenhum consumidor existente.
+   */
+  volumeM5: number | null;
+  volumeH1: number | null;
+  volumeH6: number | null;
+  txnsM5: { buys: number | null; sells: number | null };
+  txnsH1: { buys: number | null; sells: number | null };
+  txnsH6: { buys: number | null; sells: number | null };
+  priceChangeM5: number | null;
+  priceChangeH1: number | null;
+  priceChangeH6: number | null;
+  priceChangeH24: number | null;
 }
 
 export interface CoinRecord {
@@ -106,7 +122,8 @@ export type AlertMetric =
   | "liquidity_drop_pct"
   | "opportunity_score_change"
   | "risk_score_above"
-  | "whale_movement";
+  | "whale_movement"
+  | "opportunity_signal";
 
 export interface AlertRule {
   id: string;

@@ -1,7 +1,8 @@
 "use client";
 
-import { AlertEvent, AlertMetric, AlertRule, CoinRecord } from "./types";
-import { CoinScores } from "./types";
+import { AlertEvent, AlertMetric, AlertRule } from "./types";
+import { DiscoveryRecord } from "./discovery";
+import { OpportunityClassification } from "./opportunity";
 
 const RULES_KEY = "memescope:alert-rules:v1";
 const EVENTS_KEY = "memescope:alert-events:v1";
@@ -100,16 +101,24 @@ function metricLabel(m: AlertMetric): string {
       return "Risk Score acima de";
     case "whale_movement":
       return "Movimentação anormal de grandes detentores";
+    case "opportunity_signal":
+      return "Nova sinal do Opportunity Engine (Watch ou superior)";
   }
 }
+
+const OPPORTUNITY_TIER_RANK: Record<OpportunityClassification, number> = {
+  no_signal: 0,
+  watch: 1,
+  high_momentum_watch: 2,
+  strong_opportunity: 3,
+  very_strong_opportunity: 4,
+};
 
 /**
  * Avalia todas as regras ativas contra os dados mais recentes.
  * Corre inteiramente no browser: não há execução de transações nem ligação de carteiras.
  */
-export function evaluateAlerts(
-  records: (CoinRecord & { scores: CoinScores })[]
-): AlertEvent[] {
+export function evaluateAlerts(records: DiscoveryRecord[]): AlertEvent[] {
   const rules = getAlertRules().filter((r) => r.enabled);
   if (rules.length === 0) return [];
 
@@ -197,6 +206,20 @@ export function evaluateAlerts(
       case "whale_movement":
         // Sem fonte de dados de carteiras integrada nesta versão — a regra fica registada mas nunca dispara sozinha.
         break;
+      case "opportunity_signal": {
+        const opp = record.opportunity;
+        if (opp && opp.classification !== "no_signal") {
+          const rank = OPPORTUNITY_TIER_RANK[opp.classification];
+          const lastRank = lastValues[`opp-tier:${rule.coinId}`] ?? -1;
+          // Só dispara quando o nível SOBE face ao último conhecido — evita repetir a cada polling (ex.: 84 -> 85).
+          if (rank > lastRank) {
+            triggered = true;
+            message = `${record.def.symbol}: ${opp.classification.replace(/_/g, " ")} (score ${opp.total ?? "N/D"}).`;
+          }
+          nextLastValues[`opp-tier:${rule.coinId}`] = rank;
+        }
+        break;
+      }
     }
 
     if (triggered) {

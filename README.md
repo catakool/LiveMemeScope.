@@ -15,12 +15,22 @@ criar alertas locais com notificações do navegador.
 ```
 Browser (Next.js App Router, client components)
         │
-        ├── /api/coins            → agrega mercado + on-chain para toda a watchlist
-        ├── /api/coins/[id]       → detalhe + histórico de preço/volume de uma moeda
-        └── /api/verify-token     → valida um endereço de contrato via DexScreener
-                │
-                ├── lib/coingecko.ts   (fetch + cache TTL + fallback obsoleto)
-                └── lib/dexscreener.ts (fetch + cache TTL + fallback obsoleto)
+        ├── /api/coins            → Discovery Feed + tokens manuais + Opportunity Score anexado
+        ├── /api/coins/[id]       → detalhe + histórico + Opportunity Score + sinais recentes
+        ├── /api/verify-token     → valida um endereço de contrato via DexScreener (preview)
+        ├── /api/tokens/register  → regista um token verificado no servidor (fonte de verdade)
+        ├── /api/tokens           → lista tokens vigiados (debug/transparência)
+        ├── /api/signals          → histórico de sinais gerados (para backtesting futuro)
+        │
+        ├── lib/coingecko.ts, lib/dexscreener.ts   (fetch + cache TTL + fallback obsoleto)
+        ├── lib/discovery.ts       (Discovery Engine — "que moedas são interessantes?")
+        ├── lib/scoring.ts         (Opportunity/Risk Score "estáticos", ponto a ponto)
+        ├── lib/tokenRegistry.ts   (fonte de verdade unificada: descoberta + manuais)
+        ├── lib/opportunity.ts     (Opportunity Engine — "que moedas estão a acelerar?")
+        ├── lib/storage/           (snapshots/sinais persistentes — Redis via Upstash)
+        └── lib/monitor.ts         (job chamado pelo Cron Job da Vercel — ver vercel.json)
+
+vercel.json (cron */2min) ──► GET /api/cron/monitor ──► lib/monitor.ts
 ```
 
 - As chamadas às APIs externas correm **sempre no servidor** (rotas `/api/*`), nunca
@@ -29,24 +39,36 @@ Browser (Next.js App Router, client components)
   reduz o número de pedidos às APIs externas e respeita os seus limites de taxa.
 - Se uma API externa falhar, a app tenta devolver o último valor em cache (marcado
   como "dados atrasados") antes de assumir "API indisponível". **Nunca inventa valores.**
+- A recolha de dados para deteção de aceleração (Opportunity Engine) vive num
+  **Cron Job server-side**, não num polling do browser — ver secção 8.
 
 ## 2. Estrutura de pastas
 
 ```
+vercel.json                                → agenda o Cron Job de monitorização
 src/
   app/
     layout.tsx, globals.css, page.tsx      → layout raiz e dashboard principal
-    api/coins/route.ts                     → lista agregada
-    api/coins/[id]/route.ts                → detalhe de uma moeda
-    api/verify-token/route.ts              → verificação de contrato
-  components/                              → UI (cartões, gráficos, tabela, alertas…)
+    api/coins/route.ts                     → Discovery Feed + tokens manuais + Opportunity Score
+    api/coins/[id]/route.ts                → detalhe de uma moeda + Opportunity Score + sinais
+    api/verify-token/route.ts              → verificação de contrato (preview, sem registar)
+    api/tokens/register/route.ts           → regista um token manual no servidor
+    api/tokens/route.ts                    → lista tokens vigiados
+    api/signals/route.ts                   → histórico de sinais gerados
+    api/cron/monitor/route.ts              → endpoint chamado pelo Cron Job (protegido por CRON_SECRET)
+  components/                              → UI (cartões, gráficos, tabela, alertas, Live Opportunities…)
   hooks/useCoins.ts                        → polling client-side + avaliação de alertas
   lib/
-    types.ts        → tipos partilhados
-    tokens.ts        → watchlist inicial (registo estático)
+    types.ts                → tipos partilhados
+    discovery.ts             → Discovery Engine
+    scoring.ts                → Opportunity/Risk Score "estáticos" (ponto a ponto)
+    opportunity.ts            → Opportunity Engine (séries temporais, aceleração)
+    tokenRegistry.ts          → fonte de verdade unificada de tokens vigiados
+    monitor.ts                → lógica do job de monitorização (chamado pelo cron)
+    catalystProvider.ts       → interface preparada para catalisadores futuros (sem implementação)
+    storage/                  → camada de persistência (Redis via Upstash + fallback em memória)
     coingecko.ts / dexscreener.ts          → wrappers das APIs externas
-    scoring.ts        → fórmulas do Opportunity Score e Risk Score
-    alerts.ts / watchlist.ts               → localStorage (regras, watchlist, tokens custom)
+    alerts.ts / watchlist.ts               → localStorage (regras, watchlist pessoal, tokens custom)
     format.ts / tiers.ts                   → helpers de formatação e metadados visuais
 ```
 
@@ -161,13 +183,178 @@ npm run build
 npm run start
 ```
 
-### Variáveis de ambiente
+## 7. Configuração de produção (Redis + Cron)
 
 | Variável | Obrigatória | Descrição |
 |---|---|---|
 | `COINGECKO_API_KEY` | Não | Chave do plano Demo/Pro da CoinGecko, para limites de taxa mais altos. |
+| `KV_REST_API_URL` | Sim, em produção | URL REST do Redis (Upstash). Injetada automaticamente ao instalar a integração **"Upstash for Redis"** a partir do Vercel Marketplace. |
+| `KV_REST_API_TOKEN` | Sim, em produção | Token REST do Redis (Upstash), injetado da mesma forma. |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Alternativa | Nomes alternativos aceites, caso a integração os injete com este nome em vez de `KV_REST_API_*`. |
+| `CRON_SECRET` | Recomendada em produção | Protege `/api/cron/monitor`. A Vercel envia-o automaticamente como `Authorization: Bearer <valor>` nas chamadas do próprio Cron Job quando esta variável está definida no projeto. Sem ela, o endpoint fica sem autenticação (aceitável em desenvolvimento local, não em produção). |
 
-## 7. Notas de segurança
+**Sem `KV_REST_API_URL`/`KV_REST_API_TOKEN` configuradas**, a aplicação continua a
+funcionar (build, arranque e todas as rotas respondem), mas usa um armazenamento
+em memória **não persistente** para snapshots/sinais/tokens vigiados — perde-se a
+cada reinício do processo, e em produção (serverless) isso pode acontecer a
+qualquer momento. É apenas um modo de desenvolvimento local sem base de dados; a
+resposta de `/api/coins` inclui sempre `"storage": "memory" | "redis"` para que
+saiba em que modo está a correr.
+
+### Configurar o Redis (Upstash) na Vercel — passo a passo
+
+1. No projeto na Vercel, vá a **Storage** (ou **Marketplace** → categoria "Storage").
+2. Procure **"Upstash for Redis"** e clique em **Add** / **Install**.
+3. Siga o assistente para criar uma base de dados Redis e ligá-la a este projeto.
+4. A Vercel injeta automaticamente `KV_REST_API_URL` e `KV_REST_API_TOKEN` nas
+   variáveis de ambiente do projeto (Production, Preview e Development, consoante
+   escolher). Não precisa de copiar/colar nada manualmente.
+5. Redeploy o projeto para que as novas variáveis fiquem disponíveis nas funções.
+6. (Opcional mas recomendado) Em **Settings → Environment Variables**, adicione
+   `CRON_SECRET` com um valor aleatório à sua escolha (ex.: gerado com
+   `openssl rand -hex 32`).
+
+### O Cron Job de monitorização
+
+O ficheiro `vercel.json` define:
+
+```json
+{ "crons": [{ "path": "/api/cron/monitor", "schedule": "*/2 * * * *" }] }
+```
+
+Isto pede à Vercel para chamar `/api/cron/monitor` a cada 2 minutos. **A frequência
+mínima permitida por este cron depende do seu plano Vercel** — planos Hobby e Pro
+têm limites diferentes que podem mudar ao longo do tempo; confirme o limite atual
+em vercel.com/docs antes de assumir que os 2 minutos serão respeitados exatamente.
+Se o seu plano não permitir esta frequência, duas alternativas:
+
+- Aumente o `schedule` para o mínimo permitido (o sistema funciona na mesma, só
+  acumula histórico mais devagar).
+- Use um serviço externo de agendamento (ex.: cron-job.org, GitHub Actions) para
+  chamar `GET https://o-seu-dominio/api/cron/monitor` com o cabeçalho
+  `Authorization: Bearer <CRON_SECRET>` na frequência desejada.
+
+## 8. Opportunity Engine (deteção de aceleração em tempo quase real)
+
+Além do Discovery Engine (secção 3), existe agora um segundo motor, **separado e
+independente**, em `src/lib/opportunity.ts`:
+
+- **Discovery Engine** responde "que moedas são interessantes?" (ranking estático,
+  categoria Meme + tendência).
+- **Opportunity Engine** responde "que moedas estão a acelerar agora?" (analisa a
+  série temporal de snapshots, não um único ponto no tempo).
+
+### Arquitetura
+
+```
+vercel.json (cron */2min)
+  └─ GET /api/cron/monitor (protegido por CRON_SECRET)
+       └─ lib/monitor.ts: runMonitorCycle()
+            ├─ atualiza o registo de tokens vigiados (lib/tokenRegistry.ts)
+            │    — une tokens descobertos automaticamente + adicionados manualmente
+            ├─ obtém dados de mercado (CoinGecko) e on-chain (DexScreener)
+            │    em lote, respeitando limites de taxa (máx. 40 tokens/execução)
+            ├─ guarda um snapshot por token (lib/storage — Redis/Upstash)
+            ├─ calcula o Opportunity Score (lib/opportunity.ts) a partir do
+            │    histórico de snapshots
+            └─ regista um novo "sinal" só quando a classificação SOBE de nível
+                 face à última conhecida (deduplicação/cooldown — evita spam)
+
+GET /api/coins e GET /api/coins/[id]
+  └─ leem os snapshots já guardados (sem chamar APIs externas outra vez) e
+       anexam o Opportunity Score a cada moeda devolvida
+```
+
+### Por que é preciso um Cron Job (e não `setInterval`)
+
+A aplicação corre em funções serverless (Vercel). Cada pedido pode ser servido por
+uma instância diferente e sem estado persistente entre si — um `setInterval`
+dentro de uma rota API **não sobrevive** entre invocações e não é fiável em
+produção. Por isso a recolha de dados vive num Cron Job da Vercel (`vercel.json`),
+independente de haver ou não utilizadores com a página aberta.
+
+### Modelo do snapshot (`lib/storage/types.ts`)
+
+Cada snapshot guardado tem, aproximadamente: `tokenKey, chain, address,
+coingeckoId, timestamp, price, marketCap, liquidityUsd, volumeM5/H1/H6/H24,
+buys/sellsM5/H1/H6/H24`. Mantém-se um histórico rolante (~200 snapshots por
+token, ≈6-7h a uma cadência de 2min) — sem duplicação desnecessária.
+
+### Metodologia do Opportunity Score (pesos ajustáveis, ver `OPPORTUNITY_WEIGHTS`)
+
+| Componente | Peso | O que mede |
+|---|---|---|
+| Momentum | 25% | Variação de preço em janelas curtas (1m/5m/15m/1h), com deteção de **aceleração** (janelas curtas a subir mais depressa que as longas), não apenas "está a subir" |
+| Volume acceleration | 25% | Volume atual (normalizado por hora) vs. média do volume histórico do próprio token — um rácio 8-10x é muito mais relevante do que volume absoluto alto |
+| Buy pressure | 20% | Rácio compras/(compras+vendas), na janela mais granular disponível com dados suficientes |
+| Liquidity quality | 15% | Liquidez face à capitalização (ou absoluta, se não houver capitalização) |
+| Market structure / token age | 10% | Combina idade do par on-chain e dimensão da capitalização — não assume que "pequeno = oportunidade", só descreve a estrutura |
+| Catalyst | 5% | Sempre indisponível nesta versão (ver `lib/catalystProvider.ts` — interface pronta, sem fonte fiável integrada) |
+
+Estes pesos **não são definitivos** — são constantes exportadas, fáceis de
+ajustar depois de haver dados suficientes para validar a metodologia (ver
+secção 10, backtesting).
+
+**Confiança ≠ score.** A `confidence` é a fração do peso total coberta por
+componentes com dados reais disponíveis — nunca é igual à pontuação. Um token
+recém-vigiado, com pouco histórico, terá sempre confiança baixa mesmo que o
+score bruto pareça alto.
+
+**Segurança > momentum.** Um risco crítico (liquidez abaixo de $15k, ou
+confiança abaixo de 35%) **invalida** a classificação, forçando-a para
+"No Signal", mesmo que a pontuação bruta seja elevada — replicando o exemplo do
+pedido original (score 94 + liquidez extrema = "NO SIGNAL / HIGH RISK").
+
+### Classificação
+
+| Score | Classificação |
+|---|---|
+| 90–100 | Very Strong Opportunity |
+| 80–89 | Strong Opportunity |
+| 70–79 | High Momentum / Watch |
+| 60–69 | Watch |
+| < 60 | No Signal |
+
+### Linguagem usada na interface
+
+Nunca "vai subir" ou "lucro garantido". Sempre condicional: "Strong
+Opportunity", "High Momentum", "Watch", "High Risk", "Potential Entry" — sempre
+acompanhado das razões concretas ("Why now?") e dos riscos identificados.
+
+## 9. Tokens adicionados manualmente (correção do problema original)
+
+Antes desta versão, um token adicionado via "Adicionar token de risco extremo"
+ficava guardado **apenas em localStorage** e nunca entrava no pipeline de dados
+— aparecia uma vez no ecrã de verificação e depois ficava invisível e congelado.
+
+Isso está corrigido: `POST /api/tokens/register` regista o token no servidor
+(`lib/tokenRegistry.ts`, identidade sempre por `chain + endereço de contrato`,
+nunca pelo símbolo). A partir daí, o token:
+
+1. entra na lista processada pelo Cron Job de monitorização;
+2. começa a acumular snapshots de preço/volume/liquidez;
+3. aparece em `/api/coins` (e portanto no dashboard) com dados ao vivo;
+4. fica elegível para o Opportunity Engine assim que tiver histórico suficiente;
+5. pode disparar alertas (nova métrica `opportunity_signal` em `lib/alerts.ts`).
+
+`localStorage` continua a ser usado (`lib/watchlist.ts`), mas apenas como lista
+pessoal de conveniência — nunca mais como fonte de verdade dos dados.
+
+## 10. Histórico de sinais e preparação para backtesting
+
+Cada vez que a classificação de um token sobe de nível pela primeira vez, é
+guardado um registo completo (`StoredSignal` em `lib/storage/types.ts`): token,
+chain, endereço, timestamp, preço, capitalização, liquidez, volume, score,
+componentes, confiança, classificação, razões e riscos. Consultável em
+`GET /api/signals` (globalmente) ou `GET /api/signals?tokenKey=...` (por token).
+
+Isto **não implementa ainda** um sistema de backtesting visual — apenas garante
+que os dados necessários (preço no momento do sinal) ficam guardados para que,
+mais tarde, se possa comparar com o preço passados 5m/15m/1h/6h/24h e assim
+avaliar se o Opportunity Score tem valor preditivo real. Nenhuma afirmação de
+rentabilidade é feita nesta versão.
+
+## 11. Notas de segurança
 
 - Não há ligação de carteiras, pedido de seed phrases nem execução de transações —
   os alertas usam apenas notificações do navegador (`Notification API`).
@@ -177,3 +364,11 @@ npm run start
 - Dados simulados **não são usados** nesta versão — quando uma API falha, a app
   mostra o último valor real em cache com o estado "dados atrasados" ou, na
   ausência de qualquer valor anterior, "API indisponível". Nunca inventa números.
+- Nenhuma variável de ambiente sensível (`KV_REST_API_TOKEN`, `CRON_SECRET`,
+  `COINGECKO_API_KEY`) é lida por nenhum componente `"use client"` — todas vivem
+  exclusivamente em rotas API e módulos server-side (`lib/storage/*`,
+  `lib/coingecko.ts`, `app/api/*`). Confirmado por auditoria de código antes de
+  cada entrega.
+- Nova dependência: `@upstash/redis` (cliente oficial recomendado pela Vercel
+  para Redis desde a descontinuação de `@vercel/kv`). Sem custos ocultos: só é
+  usada quando `KV_REST_API_URL`/`KV_REST_API_TOKEN` existem.
