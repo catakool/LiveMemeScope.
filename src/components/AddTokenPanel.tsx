@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { DexPairData } from "@/lib/types";
 import { addCustomToken, getCustomTokens, removeCustomToken, CustomToken } from "@/lib/watchlist";
+import { watchedTokenKey } from "@/lib/tokenKey";
 import { formatUsd, formatDateTime } from "@/lib/format";
 
 interface VerifyResponse {
@@ -22,6 +23,30 @@ export default function AddTokenPanel() {
   );
   const [registering, setRegistering] = useState(false);
   const [registerError, setRegisterError] = useState<string | null>(null);
+  const [removingKey, setRemovingKey] = useState<string | null>(null);
+
+  const removeToken = async (t: CustomToken) => {
+    const key = watchedTokenKey({ chain: t.chain, address: t.address });
+    setRemovingKey(key);
+    try {
+      const res = await fetch("/api/tokens/register", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key }),
+      });
+      // Idempotente: mesmo que o servidor diga "not_found", removemos da lista local na mesma.
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        setRegisterError(json?.error ?? "Não foi possível remover o token no servidor. Tente novamente.");
+        return;
+      }
+      setCustom(removeCustomToken(t.address));
+    } catch {
+      setRegisterError("Falha ao contactar o servidor ao remover o token. Tente novamente.");
+    } finally {
+      setRemovingKey(null);
+    }
+  };
 
   const verify = async () => {
     setLoading(true);
@@ -154,10 +179,11 @@ export default function AddTokenPanel() {
                   </span>
                 </span>
                 <button
-                  onClick={() => setCustom(removeCustomToken(t.address))}
-                  className="text-[var(--accent-risk)] hover:opacity-80 focus-ring"
+                  onClick={() => removeToken(t)}
+                  disabled={removingKey === watchedTokenKey({ chain: t.chain, address: t.address })}
+                  className="text-[var(--accent-risk)] hover:opacity-80 disabled:opacity-40 focus-ring"
                 >
-                  Remover
+                  {removingKey === watchedTokenKey({ chain: t.chain, address: t.address }) ? "A remover…" : "Remover"}
                 </button>
               </li>
             ))}

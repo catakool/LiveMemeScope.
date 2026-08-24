@@ -4,12 +4,21 @@ import { getDexDataByAddress } from "@/lib/dexscreener";
 import { computeScores } from "@/lib/scoring";
 import { computeOpportunity } from "@/lib/opportunity";
 import { deriveRiskTier } from "@/lib/discovery";
-import { getStorage, watchedTokenKey } from "@/lib/storage";
-import { TokenDefinition } from "@/lib/types";
+import { getStorage } from "@/lib/storage";
+import { parseTokenKey, watchedTokenKey } from "@/lib/tokenKey";
+import { listWatchedTokens } from "@/lib/tokenRegistry";
+import { Chain, SourceMeta, TokenDefinition } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 const OPPORTUNITY_SNAPSHOT_LOOKBACK_MS = 90 * 60_000;
 
+/**
+ * Aceita, no parâmetro de rota, uma tokenKey (`chain:endereço` ou
+ * `cg:coingeckoId`) ou, por compatibilidade, um coingeckoId "nu". NUNCA
+ * devolve 404 apenas porque um token adicionado manualmente não existe na
+ * CoinGecko — nesse caso mostra apenas o que a DexScreener e os snapshots
+ * próprios têm (Fase 1 do hardening).
+ */
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -19,40 +28,95 @@ export async function GET(
   const { searchParams } = new URL(req.url);
   const days = searchParams.get("days") ?? "30";
 
-  const [{ data: markets, meta: cgMeta }, platformRes, chartRes] = await Promise.all([
-    getMarkets([id]),
-    getCoinPlatformDetail(id),
-    getMarketChart(id, days === "max" ? "max" : Number(days)),
-  ]);
+  // 1) Se o token já estiver no registo (manual ou descoberta), essa é a fonte de verdade da identidade.
+  const watched = await listWatchedTokens();
+  const registryHit = watched.find((t) => t.key === id);
 
-  const market = markets[id] ?? null;
-  if (!market) {
-    return NextResponse.json({ error: "Moeda não encontrada na CoinGecko." }, { status: 404 });
+  let chain: Chain | null = registryHit?.chain ?? null;
+  let contractAddress: string | null = registryHit?.contractAddress ?? null;
+  let coingeckoId: string | null = registryHit?.coingeckoId ?? null;
+
+  if (!registryHit) {
+    const parsed = parseTokenKey(id);
+    chain = parsed.chain;
+    contractAddress = parsed.address;
+    coingeckoId = parsed.coingeckoId;
   }
 
-  const platform = platformRes.data;
-  const dexRes = platform.contractAddress
-    ? await getDexDataByAddress(platform.contractAddress, platform.chain)
+  // 2) Dados da CoinGecko, só se tivermos um coingeckoId.
+  let market = null;
+  let cgMeta: SourceMeta = { status: "unavailable", lastUpdated: null, source: "coingecko" };
+  let chart = null;
+  let chartMeta: SourceMeta = { status: "unavailable", lastUpdated: null, source: "coingecko" };
+
+  if (coingeckoId) {
+    const [marketsRes, chartRes] = await Promise.all([
+      getMarkets([coingeckoId]),
+      getMarketChart(coingeckoId, days === "max" ? "max" : Number(days)),
+    ]);
+    market = marketsRes.data[coingeckoId] ?? null;
+    cgMeta = marketsRes.meta;
+    chart = chartRes.data;
+    chartMeta = chartRes.meta;
+
+    // Se não sabíamos a chain/contrato ainda, tentamos completá-los a partir da própria CoinGecko.
+    if (!chain || !contractAddress) {
+      const platformRes = await getCoinPlatformDetail(coingeckoId);
+      chain = chain ?? platformRes.data.chain;
+      contractAddress = contractAddress ?? platformRes.data.contractAddress;
+    }
+  }
+
+  // 3) Dados on-chain da DexScreener, só se tivermos endereço de contrato.
+  const dexRes = contractAddress
+    ? await getDexDataByAddress(contractAddress, chain ?? undefined)
     : { data: null, meta: { status: "unavailable" as const, lastUpdated: null, source: "dexscreener" as const } };
 
-  const scores = computeScores(market, dexRes.data, chartRes.data);
+  // 4) Sem NENHUM dado (nem mercado nem on-chain): tentar o último estado persistido antes de desistir.
+  if (!market && !dexRes.data) {
+    const storage = getStorage();
+    const tokenKey = registryHit?.key ?? id;
+    const state = await storage.getCurrentTokenState(tokenKey);
+    if (!state) {
+      return NextResponse.json(
+        {
+          error:
+            "Não há dados disponíveis para este token ainda (nem CoinGecko, nem DexScreener, nem histórico próprio). " +
+            "Se acabou de o adicionar manualmente, aguarde a próxima execução do job de monitorização.",
+        },
+        { status: 404 }
+      );
+    }
+    // Usa o último estado persistido, claramente identificado como possivelmente desatualizado.
+    market = (state.marketRaw as typeof market) ?? null;
+    const dexFromState = state.dexRaw as typeof dexRes.data;
+    dexRes.data = dexFromState ?? null;
+    dexRes.meta = { status: "stale", lastUpdated: state.updatedAt, source: "dexscreener" };
+  }
+
+  const resolvedChain: Chain = chain ?? dexRes.data?.chain ?? "unknown";
+  const tokenKey = registryHit?.key ?? watchedTokenKey({ chain: resolvedChain, address: contractAddress, coingeckoId });
 
   const def: TokenDefinition = {
-    coingeckoId: id,
-    symbol: market.symbol,
-    name: market.name,
-    chain: platform.chain,
-    contractAddress: platform.contractAddress,
-    riskTier: deriveRiskTier(market.marketCap),
+    tokenKey,
+    coingeckoId,
+    symbol: registryHit?.symbol ?? market?.symbol ?? dexRes.data?.dexId ?? "TOKEN",
+    name: registryHit?.name ?? market?.name ?? registryHit?.symbol ?? "Token",
+    chain: resolvedChain,
+    contractAddress,
+    riskTier: deriveRiskTier(market?.marketCap ?? null),
     verified: true,
-    note: "Nível de risco estimado por capitalização de mercado (heurística), não substitui o Risk Score detalhado abaixo.",
+    note: coingeckoId
+      ? "Nível de risco estimado por capitalização de mercado (heurística), não substitui o Risk Score detalhado abaixo."
+      : "Token sem listagem na CoinGecko — dados apenas da DexScreener e do histórico próprio (sem gráfico histórico de longo prazo).",
   };
 
+  const scores = computeScores(market, dexRes.data, chart);
+
   const storage = getStorage();
-  const key = watchedTokenKey({ chain: def.chain, address: def.contractAddress, coingeckoId: id });
   let opportunity = null;
   try {
-    const snapshots = await storage.getRecentSnapshots(key, Date.now() - OPPORTUNITY_SNAPSHOT_LOOKBACK_MS);
+    const snapshots = await storage.getRecentSnapshots(tokenKey, Date.now() - OPPORTUNITY_SNAPSHOT_LOOKBACK_MS);
     if (snapshots.length > 0) {
       opportunity = computeOpportunity(snapshots, market, dexRes.data, []);
     }
@@ -60,20 +124,20 @@ export async function GET(
     opportunity = null;
   }
 
-  const signals = await storage.getRecentSignals(key, 20).catch(() => []);
+  const signals = await storage.getRecentSignals(tokenKey, 20).catch(() => []);
 
   return NextResponse.json({
     def,
     market,
     dex: dexRes.data,
-    chart: chartRes.data,
+    chart,
     scores,
     opportunity,
     signals,
     meta: {
       coingecko: cgMeta,
       dexscreener: dexRes.meta,
-      chart: chartRes.meta,
+      chart: chartMeta,
     },
   });
 }

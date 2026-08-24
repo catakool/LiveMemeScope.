@@ -3,6 +3,7 @@
 import { AlertEvent, AlertMetric, AlertRule } from "./types";
 import { DiscoveryRecord } from "./discovery";
 import { OpportunityClassification } from "./opportunity";
+import { OPPORTUNITY_CONFIG } from "./opportunityConfig";
 
 const RULES_KEY = "memescope:alert-rules:v1";
 const EVENTS_KEY = "memescope:alert-events:v1";
@@ -127,7 +128,7 @@ export function evaluateAlerts(records: DiscoveryRecord[]): AlertEvent[] {
   const nextLastValues = { ...lastValues };
 
   for (const rule of rules) {
-    const record = records.find((r) => r.def.coingeckoId === rule.coinId);
+    const record = records.find((r) => r.def.tokenKey === rule.coinId);
     if (!record) continue;
 
     let triggered = false;
@@ -211,12 +212,20 @@ export function evaluateAlerts(records: DiscoveryRecord[]): AlertEvent[] {
         if (opp && opp.classification !== "no_signal") {
           const rank = OPPORTUNITY_TIER_RANK[opp.classification];
           const lastRank = lastValues[`opp-tier:${rule.coinId}`] ?? -1;
-          // Só dispara quando o nível SOBE face ao último conhecido — evita repetir a cada polling (ex.: 84 -> 85).
-          if (rank > lastRank) {
+          const lastFiredAt = lastValues[`opp-lastfired:${rule.coinId}`];
+          const cooldownElapsed = !lastFiredAt || Date.now() - lastFiredAt >= OPPORTUNITY_CONFIG.alerts.cooldownMs;
+          // Só dispara quando o nível SOBE face ao último conhecido (rearma sozinho depois de
+          // voltar a "no_signal") E já passou o cooldown mínimo — evita repetir a cada polling
+          // (ex.: 84 -> 85) e evita "flapping" de disparos muito próximos no tempo.
+          if (rank > lastRank && cooldownElapsed) {
             triggered = true;
             message = `${record.def.symbol}: ${opp.classification.replace(/_/g, " ")} (score ${opp.total ?? "N/D"}).`;
+            nextLastValues[`opp-lastfired:${rule.coinId}`] = Date.now();
           }
           nextLastValues[`opp-tier:${rule.coinId}`] = rank;
+        } else {
+          // Voltou a no_signal: guarda o rank 0 para que a próxima subida conte como "nova" (rearm).
+          nextLastValues[`opp-tier:${rule.coinId}`] = 0;
         }
         break;
       }

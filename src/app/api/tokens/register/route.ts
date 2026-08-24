@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDexDataByAddress } from "@/lib/dexscreener";
-import { registerManualToken } from "@/lib/tokenRegistry";
+import { registerManualToken, removeManualToken } from "@/lib/tokenRegistry";
 import { Chain } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -52,5 +52,29 @@ export async function POST(req: NextRequest) {
     token,
     note:
       "O token foi registado no servidor e vai começar a acumular histórico de preço/volume/liquidez a partir da próxima execução do job de monitorização (aproximadamente a cada 1-2 minutos). O Opportunity Score só fica disponível depois de existir histórico suficiente.",
+  });
+}
+
+/**
+ * Remove um token adicionado manualmente (Fase 2 do hardening).
+ * Idempotente: repetir a chamada para um token já removido devolve sucesso
+ * (removed: false, reason: "not_found"), nunca um erro.
+ */
+export async function DELETE(req: NextRequest) {
+  const body = await req.json().catch(() => null);
+  const key = typeof body?.key === "string" ? body.key : "";
+
+  if (!key) {
+    return NextResponse.json({ error: "Indique a tokenKey do token a remover." }, { status: 400 });
+  }
+
+  const result = await removeManualToken(key);
+
+  return NextResponse.json({
+    ...result,
+    note: result.removed
+      ? "O token deixou de ser monitorizado. O registo de vigilância e o estado atual foram apagados; " +
+        "os sinais históricos já gerados por este token foram conservados para auditoria/backtesting."
+      : undefined,
   });
 }

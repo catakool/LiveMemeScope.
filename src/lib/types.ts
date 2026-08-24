@@ -12,7 +12,14 @@ export type Chain =
 
 /** Entrada estática da watchlist (o "catálogo" de moedas que o dashboard conhece). */
 export interface TokenDefinition {
-  coingeckoId: string; // id oficial da API CoinGecko, nunca o símbolo
+  /**
+   * Identidade interna única: `chain:endereço` quando existe contrato, ou
+   * `cg:<coingeckoId>` para moedas nativas. É o que a UI deve usar como
+   * chave/identificador — nunca `coingeckoId` (que pode ser `null`).
+   */
+  tokenKey: string;
+  /** Id oficial da API CoinGecko, ou `null` se este token não está listado lá (ex.: token manual muito recente). */
+  coingeckoId: string | null;
   symbol: string;
   name: string;
   chain: Chain;
@@ -127,6 +134,7 @@ export type AlertMetric =
 
 export interface AlertRule {
   id: string;
+  /** Na verdade uma tokenKey (chain:endereço ou cg:coingeckoId) — o nome ficou por compatibilidade com regras já guardadas. */
   coinId: string;
   metric: AlertMetric;
   threshold: number;

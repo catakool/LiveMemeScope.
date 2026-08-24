@@ -8,6 +8,7 @@ import {
 import { getDexDataByAddress } from "./dexscreener";
 import { computeScores } from "./scoring";
 import { OpportunityResult } from "./opportunity";
+import { watchedTokenKey } from "./tokenKey";
 
 // ---------------------------------------------------------------------------
 // MemeScope Discovery Engine
@@ -113,6 +114,7 @@ export async function getDiscoveryFeed(): Promise<{
     if (reasons.length === 0) reasons.push("momentum"); // garante que a lista mostra sempre um motivo
 
     const def: TokenDefinition = {
+      tokenKey: watchedTokenKey({ chain: platform.chain, address: platform.contractAddress, coingeckoId: market.id }),
       coingeckoId: market.id,
       symbol: market.symbol,
       name: market.name,

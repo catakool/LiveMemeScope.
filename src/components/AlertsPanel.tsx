@@ -30,7 +30,7 @@ const METRICS: { value: AlertMetric; label: string; unit: string }[] = [
 export default function AlertsPanel({ records }: { records: DiscoveryRecord[] }) {
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [events, setEvents] = useState<AlertEvent[]>([]);
-  const [coinId, setCoinId] = useState(records[0]?.def.coingeckoId ?? "");
+  const [coinId, setCoinId] = useState(records[0]?.def.tokenKey ?? "");
   const [metric, setMetric] = useState<AlertMetric>("price_above");
   const [threshold, setThreshold] = useState<number>(0);
   const [notifStatus, setNotifStatus] = useState<NotificationPermission>("default");
@@ -48,7 +48,7 @@ export default function AlertsPanel({ records }: { records: DiscoveryRecord[] })
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- escolhe uma moeda por omissão assim que a lista chega da API
-    if (!coinId && records[0]) setCoinId(records[0].def.coingeckoId);
+    if (!coinId && records[0]) setCoinId(records[0].def.tokenKey);
   }, [records, coinId]);
 
   const addRule = () => {
@@ -83,7 +83,7 @@ export default function AlertsPanel({ records }: { records: DiscoveryRecord[] })
           className="bg-[var(--surface-2)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-sm focus-ring outline-none"
         >
           {records.map((r) => (
-            <option key={r.def.coingeckoId} value={r.def.coingeckoId}>
+            <option key={r.def.tokenKey} value={r.def.tokenKey}>
               {r.def.symbol}
             </option>
           ))}
@@ -121,7 +121,7 @@ export default function AlertsPanel({ records }: { records: DiscoveryRecord[] })
         {rules.length === 0 && <p className="text-xs text-[var(--text-muted)]">Ainda não criou nenhum alerta.</p>}
         <ul className="space-y-1.5">
           {rules.map((r) => {
-            const coin = records.find((rec) => rec.def.coingeckoId === r.coinId);
+            const coin = records.find((rec) => rec.def.tokenKey === r.coinId);
             return (
               <li
                 key={r.id}

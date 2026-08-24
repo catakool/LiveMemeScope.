@@ -104,8 +104,8 @@ export default function CoinTable({
         <tbody>
           {sorted.map((r) => (
             <tr
-              key={r.def.coingeckoId}
-              onClick={() => onOpen(r.def.coingeckoId)}
+              key={r.def.tokenKey}
+              onClick={() => onOpen(r.def.tokenKey)}
               className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--surface-2)] cursor-pointer"
             >
               <td className="px-3 py-2 whitespace-nowrap">

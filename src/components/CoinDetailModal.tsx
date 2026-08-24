@@ -42,7 +42,7 @@ export default function CoinDetailModal({ coinId, onClose }: { coinId: string; o
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- inicia o fetch ao mudar de moeda/intervalo; o resultado chega no callback
     setLoading(true);
-    fetch(`/api/coins/${coinId}?days=${days}`)
+    fetch(`/api/coins/${encodeURIComponent(coinId)}?days=${days}`)
       .then((r) => r.json())
       .then((json) => {
         if (!cancelled) setData(json);
@@ -160,6 +160,12 @@ export default function CoinDetailModal({ coinId, onClose }: { coinId: string; o
                   <p className="text-xs text-[var(--text-faint)]">
                     Confiança: {(data.opportunity.confidence * 100).toFixed(0)}%. Identifica condições de mercado que
                     historicamente podem associar-se a momentum — não prevê o futuro nem garante lucros.
+                  </p>
+                  <p className="text-[10px] text-[var(--text-faint)]">
+                    Last snapshot:{" "}
+                    {Number.isFinite(data.opportunity.latestSnapshotAgeMs)
+                      ? `${Math.round(data.opportunity.latestSnapshotAgeMs / 60_000)} min ago`
+                      : "N/D"}
                   </p>
                   <div className="grid grid-cols-3 gap-2 text-xs">
                     <div>

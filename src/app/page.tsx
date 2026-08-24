@@ -35,7 +35,7 @@ export default function Home() {
 
   const filtered = useMemo(() => {
     return records.filter((r) => {
-      if (filters.watchlistOnly && !watchlist.includes(r.def.coingeckoId)) return false;
+      if (filters.watchlistOnly && !watchlist.includes(r.def.tokenKey)) return false;
       if (filters.chain !== "all" && r.def.chain !== filters.chain) return false;
       if (filters.tier !== "all" && r.def.riskTier !== filters.tier) return false;
       if (filters.minMarketCap > 0 && (r.market?.marketCap ?? 0) < filters.minMarketCap) return false;
@@ -50,7 +50,12 @@ export default function Home() {
 
   return (
     <div className="flex-1 flex flex-col">
-      <Header generatedAt={data?.generatedAt ?? null} cgMeta={data?.meta.coingecko ?? null} />
+      <Header
+        generatedAt={data?.generatedAt ?? null}
+        cgMeta={data?.meta.coingecko ?? null}
+        monitorHealth={data?.monitorHealth}
+        storageKind={data?.storage}
+      />
       <TickerTape records={records} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
@@ -110,12 +115,12 @@ export default function Home() {
               <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                 {filtered.map((r) => (
                   <CoinCard
-                    key={r.def.coingeckoId}
+                    key={r.def.tokenKey}
                     record={r}
                     reasons={r.discovery.reasons}
-                    starred={watchlist.includes(r.def.coingeckoId)}
-                    onToggleStar={() => setWatchlist(toggleWatchlist(r.def.coingeckoId))}
-                    onOpen={() => setOpenCoin(r.def.coingeckoId)}
+                    starred={watchlist.includes(r.def.tokenKey)}
+                    onToggleStar={() => setWatchlist(toggleWatchlist(r.def.tokenKey))}
+                    onOpen={() => setOpenCoin(r.def.tokenKey)}
                   />
                 ))}
               </div>

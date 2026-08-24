@@ -1,6 +1,8 @@
 import { Redis } from "@upstash/redis";
 import {
+  CurrentTokenState,
   LastClassificationState,
+  MonitorHealth,
   Snapshot,
   StorageAdapter,
   StoredSignal,
@@ -10,11 +12,9 @@ import {
 // ---------------------------------------------------------------------------
 // Adaptador de armazenamento persistente (Redis via Upstash).
 // ---------------------------------------------------------------------------
-// Variáveis de ambiente necessárias em produção (ver README para instruções):
+// Variáveis de ambiente necessárias em produção (ver README):
 //   KV_REST_API_URL / KV_REST_API_TOKEN
-//   (nomes injetados automaticamente ao instalar a integração "Upstash for
-//   Redis" a partir do Vercel Marketplace; se a instalares com outro nome,
-//   também aceitamos UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN).
+//   (ou UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN)
 // ---------------------------------------------------------------------------
 
 const WATCHED_TOKENS_KEY = "memescope:watched-tokens";
@@ -22,6 +22,9 @@ const SIGNALS_ALL_KEY = "memescope:signals:all";
 const SIGNALS_PREFIX = "memescope:signals:token:";
 const SNAPSHOTS_PREFIX = "memescope:snapshots:";
 const LAST_CLASS_PREFIX = "memescope:last-classification:";
+const CURRENT_STATE_PREFIX = "memescope:current-state:";
+const CURRENT_STATE_INDEX = "memescope:current-state:index"; // set com todas as tokenKeys que têm estado guardado
+const MONITOR_HEALTH_KEY = "memescope:monitor-health";
 
 function getUrl(): string | undefined {
   return process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
@@ -49,6 +52,21 @@ function getClient(): Redis {
   return client;
 }
 
+function hasPendingOutcome(s: StoredSignal): boolean {
+  return (
+    s.priceAt24h === undefined ||
+    s.priceAt24h === null ||
+    s.priceAt6h === undefined ||
+    s.priceAt6h === null ||
+    s.priceAt1h === undefined ||
+    s.priceAt1h === null ||
+    s.priceAt15m === undefined ||
+    s.priceAt15m === null ||
+    s.priceAt5m === undefined ||
+    s.priceAt5m === null
+  );
+}
+
 export class RedisStorageAdapter implements StorageAdapter {
   kind = "redis" as const;
 
@@ -69,15 +87,15 @@ export class RedisStorageAdapter implements StorageAdapter {
     await redis.hdel(WATCHED_TOKENS_KEY, key);
   }
 
-  async appendSnapshot(snapshot: Snapshot, maxHistory: number): Promise<void> {
+  async appendSnapshot(snapshot: Snapshot, maxHistory: number, ttlSeconds?: number): Promise<void> {
     const redis = getClient();
     const key = `${SNAPSHOTS_PREFIX}${snapshot.tokenKey}`;
     await redis.zadd(key, { score: snapshot.timestamp, member: JSON.stringify(snapshot) });
-    // mantém só as últimas `maxHistory` entradas (remove as mais antigas)
     const count = await redis.zcard(key);
     if (count > maxHistory) {
       await redis.zremrangebyrank(key, 0, count - maxHistory - 1);
     }
+    if (ttlSeconds) await redis.expire(key, ttlSeconds);
   }
 
   async getRecentSnapshots(tokenKey: string, sinceMs: number): Promise<Snapshot[]> {
@@ -103,6 +121,27 @@ export class RedisStorageAdapter implements StorageAdapter {
     }
   }
 
+  async updateSignal(signal: StoredSignal): Promise<void> {
+    // Sorted sets do Redis não suportam "editar em posição" — removemos a versão
+    // antiga (pelo mesmo score/timestamp) e voltamos a inserir a atualizada.
+    const redis = getClient();
+    const ts = new Date(signal.timestamp).getTime();
+    const perTokenKey = `${SIGNALS_PREFIX}${signal.tokenKey}`;
+    const old = await redis.zrange<string[]>(perTokenKey, ts, ts, { byScore: true });
+    for (const raw of old) {
+      const parsed = typeof raw === "string" ? (JSON.parse(raw) as StoredSignal) : (raw as unknown as StoredSignal);
+      if (parsed.id === signal.id) await redis.zrem(perTokenKey, raw);
+    }
+    await redis.zadd(perTokenKey, { score: ts, member: JSON.stringify(signal) });
+
+    const oldGlobal = await redis.zrange<string[]>(SIGNALS_ALL_KEY, ts, ts, { byScore: true });
+    for (const raw of oldGlobal) {
+      const parsed = typeof raw === "string" ? (JSON.parse(raw) as StoredSignal) : (raw as unknown as StoredSignal);
+      if (parsed.id === signal.id) await redis.zrem(SIGNALS_ALL_KEY, raw);
+    }
+    await redis.zadd(SIGNALS_ALL_KEY, { score: ts, member: JSON.stringify(signal) });
+  }
+
   async getRecentSignals(tokenKey: string | null, limit: number): Promise<StoredSignal[]> {
     const redis = getClient();
     const key = tokenKey ? `${SIGNALS_PREFIX}${tokenKey}` : SIGNALS_ALL_KEY;
@@ -111,14 +150,73 @@ export class RedisStorageAdapter implements StorageAdapter {
     return sliced.map((s) => (typeof s === "string" ? (JSON.parse(s) as StoredSignal) : (s as unknown as StoredSignal)));
   }
 
+  async getSignalsPendingOutcomes(olderThanMs: number, limit: number): Promise<StoredSignal[]> {
+    const redis = getClient();
+    const cutoff = Date.now() - olderThanMs;
+    const raw = await redis.zrange<string[]>(SIGNALS_ALL_KEY, 0, cutoff, { byScore: true });
+    const signals = raw
+      .map((s) => (typeof s === "string" ? (JSON.parse(s) as StoredSignal) : (s as unknown as StoredSignal)))
+      .filter(hasPendingOutcome);
+    return signals.slice(0, limit);
+  }
+
   async getLastClassification(tokenKey: string): Promise<LastClassificationState | null> {
     const redis = getClient();
     const raw = await redis.get<LastClassificationState>(`${LAST_CLASS_PREFIX}${tokenKey}`);
     return raw ?? null;
   }
 
-  async setLastClassification(tokenKey: string, state: LastClassificationState): Promise<void> {
+  async setLastClassification(tokenKey: string, state: LastClassificationState, ttlSeconds?: number): Promise<void> {
     const redis = getClient();
-    await redis.set(`${LAST_CLASS_PREFIX}${tokenKey}`, state);
+    if (ttlSeconds) await redis.set(`${LAST_CLASS_PREFIX}${tokenKey}`, state, { ex: ttlSeconds });
+    else await redis.set(`${LAST_CLASS_PREFIX}${tokenKey}`, state);
+  }
+
+  async deleteLastClassification(tokenKey: string): Promise<void> {
+    const redis = getClient();
+    await redis.del(`${LAST_CLASS_PREFIX}${tokenKey}`);
+  }
+
+  async setCurrentTokenState(state: CurrentTokenState, ttlSeconds?: number): Promise<void> {
+    const redis = getClient();
+    const key = `${CURRENT_STATE_PREFIX}${state.tokenKey}`;
+    if (ttlSeconds) await redis.set(key, state, { ex: ttlSeconds });
+    else await redis.set(key, state);
+    await redis.sadd(CURRENT_STATE_INDEX, state.tokenKey);
+  }
+
+  async getCurrentTokenState(tokenKey: string): Promise<CurrentTokenState | null> {
+    const redis = getClient();
+    const raw = await redis.get<CurrentTokenState>(`${CURRENT_STATE_PREFIX}${tokenKey}`);
+    return raw ?? null;
+  }
+
+  async listCurrentTokenStates(): Promise<CurrentTokenState[]> {
+    const redis = getClient();
+    const keys = await redis.smembers(CURRENT_STATE_INDEX);
+    if (!keys || keys.length === 0) return [];
+    const results = await Promise.all(keys.map((k) => this.getCurrentTokenState(k)));
+    const valid = results.filter((r): r is CurrentTokenState => r !== null);
+    // limpa o índice de chaves cujo valor já expirou (TTL) para não crescer para sempre
+    const staleKeys = keys.filter((k, i) => results[i] === null);
+    if (staleKeys.length > 0) await redis.srem(CURRENT_STATE_INDEX, ...staleKeys);
+    return valid;
+  }
+
+  async deleteCurrentTokenState(tokenKey: string): Promise<void> {
+    const redis = getClient();
+    await redis.del(`${CURRENT_STATE_PREFIX}${tokenKey}`);
+    await redis.srem(CURRENT_STATE_INDEX, tokenKey);
+  }
+
+  async setMonitorHealth(health: MonitorHealth): Promise<void> {
+    const redis = getClient();
+    await redis.set(MONITOR_HEALTH_KEY, health);
+  }
+
+  async getMonitorHealth(): Promise<MonitorHealth | null> {
+    const redis = getClient();
+    const raw = await redis.get<MonitorHealth>(MONITOR_HEALTH_KEY);
+    return raw ?? null;
   }
 }

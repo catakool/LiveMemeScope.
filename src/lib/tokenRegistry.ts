@@ -95,3 +95,40 @@ export async function listWatchedTokens(): Promise<WatchedTokenRecord[]> {
 export async function removeWatchedToken(key: string): Promise<void> {
   await getStorage().removeWatchedToken(key);
 }
+
+/** Marca que o job de monitorização acabou de processar este token — usado para o fairness batching (Fase 12). */
+export async function touchProcessed(key: string): Promise<void> {
+  const storage = getStorage();
+  const existing = (await storage.listWatchedTokens()).find((t) => t.key === key);
+  if (!existing) return;
+  await storage.upsertWatchedToken({ ...existing, lastProcessedAt: new Date().toISOString() });
+}
+
+/**
+ * Remove um token adicionado manualmente (Fase 2 do hardening).
+ * Ação idempotente: remover um token já removido (ou nunca registado) não é erro.
+ *
+ * Política de retenção documentada: apaga-se o registo de vigilância, o
+ * estado atual (CurrentTokenState) e a última classificação — deixam de
+ * fazer sentido para um token que já não é monitorizado. Os SINAIS
+ * históricos (StoredSignal) são deliberadamente CONSERVADOS, para auditoria
+ * e para não invalidar dados já usados em backtesting.
+ */
+export async function removeManualToken(key: string): Promise<{ removed: boolean; reason?: string }> {
+  const storage = getStorage();
+  const existing = (await storage.listWatchedTokens()).find((t) => t.key === key);
+
+  if (!existing) {
+    return { removed: false, reason: "not_found" };
+  }
+  if (existing.source !== "manual") {
+    return { removed: false, reason: "not_manual" };
+  }
+
+  await storage.removeWatchedToken(key);
+  await storage.deleteCurrentTokenState(key);
+  await storage.deleteLastClassification(key);
+  // Sinais (StoredSignal) NÃO são apagados — ver política de retenção acima.
+
+  return { removed: true };
+}

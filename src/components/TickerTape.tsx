@@ -14,7 +14,7 @@ export default function TickerTape({ records }: { records: (CoinRecord & { score
           const change = r.market?.change24h ?? null;
           const color = change === null ? "text-[var(--text-faint)]" : change >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]";
           return (
-            <div key={`${r.def.coingeckoId}-${i}`} className="flex items-center gap-2 text-sm font-data whitespace-nowrap">
+            <div key={`${r.def.tokenKey}-${i}`} className="flex items-center gap-2 text-sm font-data whitespace-nowrap">
               <span className="text-[var(--text-muted)] font-semibold">{r.def.symbol}</span>
               <span>{formatUsd(r.market?.price ?? null)}</span>
               <span className={color}>{formatPercent(change)}</span>

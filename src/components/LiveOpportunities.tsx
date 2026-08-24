@@ -46,7 +46,7 @@ function OpportunityCard({ record, onOpen }: { record: DiscoveryRecord; onOpen: 
         <MetricBlock label="1h" value={formatPercent(opp.metrics.change1h)} />
         <MetricBlock
           label="Volume acceleration"
-          value={opp.metrics.volumeAccelerationRatio !== null ? `${opp.metrics.volumeAccelerationRatio}x` : "N/D"}
+          value={opp.metrics.volumeRatio !== null ? `${opp.metrics.volumeRatio}x` : "N/D"}
         />
         <MetricBlock label="Buy/Sell" value={opp.metrics.buySellRatio !== null ? `${(opp.metrics.buySellRatio * 100).toFixed(0)}%` : "N/D"} />
         <MetricBlock label="Liquidez" value={formatUsd(record.dex?.liquidityUsd ?? null, { compact: true })} />
@@ -103,7 +103,7 @@ export default function LiveOpportunities({
       </p>
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {records.map((r) => (
-          <OpportunityCard key={r.def.coingeckoId} record={r} onOpen={() => onOpen(r.def.coingeckoId)} />
+          <OpportunityCard key={r.def.tokenKey} record={r} onOpen={() => onOpen(r.def.tokenKey)} />
         ))}
       </div>
     </div>

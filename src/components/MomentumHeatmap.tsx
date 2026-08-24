@@ -35,7 +35,7 @@ export default function MomentumHeatmap({ records }: { records: (CoinRecord & { 
           </thead>
           <tbody>
             {records.map((r) => (
-              <tr key={r.def.coingeckoId}>
+              <tr key={r.def.tokenKey}>
                 <td className="pl-1 py-1 text-[var(--text-muted)] font-data whitespace-nowrap">{r.def.symbol}</td>
                 {TIMEFRAMES.map((tf) => {
                   const value = r.market?.[tf.key] ?? null;

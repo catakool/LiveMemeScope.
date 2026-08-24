@@ -219,20 +219,37 @@ saiba em que modo está a correr.
 O ficheiro `vercel.json` define:
 
 ```json
-{ "crons": [{ "path": "/api/cron/monitor", "schedule": "*/2 * * * *" }] }
+{ "crons": [{ "path": "/api/cron/monitor", "schedule": "0 0 * * *" }] }
 ```
 
-Isto pede à Vercel para chamar `/api/cron/monitor` a cada 2 minutos. **A frequência
-mínima permitida por este cron depende do seu plano Vercel** — planos Hobby e Pro
-têm limites diferentes que podem mudar ao longo do tempo; confirme o limite atual
-em vercel.com/docs antes de assumir que os 2 minutos serão respeitados exatamente.
-Se o seu plano não permitir esta frequência, duas alternativas:
+**Isto corre só uma vez por dia.** É o máximo permitido pelo Cron Job nativo da
+Vercel no plano **Hobby** (gratuito) — planos com frequência menor que "uma vez
+por dia" falham no deploy nesse plano. Isto está documentado oficialmente em
+vercel.com/docs/cron-jobs/usage-and-pricing.
 
-- Aumente o `schedule` para o mínimo permitido (o sistema funciona na mesma, só
-  acumula histórico mais devagar).
-- Use um serviço externo de agendamento (ex.: cron-job.org, GitHub Actions) para
-  chamar `GET https://o-seu-dominio/api/cron/monitor` com o cabeçalho
-  `Authorization: Bearer <CRON_SECRET>` na frequência desejada.
+**Isto significa que, tal como está, o Opportunity Engine só acumula um
+snapshot por dia** — sem histórico de curto prazo suficiente para detetar
+aceleração em tempo quase real, que era o objetivo original. Para o sistema
+funcionar como pensado, tens duas opções:
+
+**Opção A — Upgrade para o plano Pro da Vercel** (permite cron a cada minuto).
+Depois de mudar de plano, muda o `schedule` de volta para `"*/2 * * * *"`
+(a cada 2 minutos) e faz redeploy.
+
+**Opção B — Manter o plano Hobby (grátis) e usar um agendador externo**, que não
+está sujeito ao limite do Cron Job nativo da Vercel (é só uma chamada HTTP normal
+à tua app, como qualquer visita):
+
+1. Cria conta grátis em [cron-job.org](https://cron-job.org) (ou usa GitHub
+   Actions com um `schedule` no workflow, se preferires).
+2. Configura para chamar, a cada 1-2 minutos:
+   `GET https://o-teu-dominio.vercel.app/api/cron/monitor`
+3. Adiciona o cabeçalho `Authorization: Bearer <o-valor-do-teu-CRON_SECRET>`
+   (o mesmo que definiste nas variáveis de ambiente da Vercel).
+4. Guarda — o serviço externo passa a "acordar" o teu endpoint na frequência
+   que quiseres, sem depender do cron nativo da Vercel nem do seu limite do
+   plano Hobby.
+
 
 ## 8. Opportunity Engine (deteção de aceleração em tempo quase real)
 
@@ -372,3 +389,182 @@ rentabilidade é feita nesta versão.
 - Nova dependência: `@upstash/redis` (cliente oficial recomendado pela Vercel
   para Redis desde a descontinuação de `@vercel/kv`). Sem custos ocultos: só é
   usada quando `KV_REST_API_URL`/`KV_REST_API_TOKEN` existem.
+
+## 12. Hardening (fase de robustez do Opportunity Engine)
+
+Esta secção documenta uma segunda ronda de trabalho sobre a arquitetura da
+secção 8, focada em **reduzir falsos positivos e tornar as señales mais
+defensáveis estatisticamente** — não em adicionar funcionalidades visuais novas.
+
+### 12.1 Identidade de tokens (`tokenKey` vs `coingeckoId`)
+
+Antes, `coingeckoId` era usado como identificador universal na UI — mas um
+token adicionado manualmente pode não ter nenhum. Agora:
+
+- `TokenDefinition.tokenKey` (string, sempre definida) é a identidade real,
+  no formato `chain:endereço` ou `cg:coingeckoId` (`src/lib/tokenKey.ts`).
+- `TokenDefinition.coingeckoId` passou a `string | null` — só existe quando o
+  token está mesmo listado na CoinGecko.
+- Toda a UI (`CoinCard`, `CoinTable`, `LiveOpportunities`, `AlertsPanel`,
+  `alerts.ts`, `page.tsx`) usa `tokenKey` como chave/identidade.
+- `GET /api/coins/[id]` aceita agora uma `tokenKey` (URL-encoded) e **nunca
+  devolve 404 só porque o token não existe na CoinGecko** — mostra o que a
+  DexScreener e o histórico próprio tiverem, com fallback ao último estado
+  persistido se as APIs externas falharem.
+
+### 12.2 Remoção de tokens manuais
+
+`DELETE /api/tokens/register` (corpo `{ "key": "<tokenKey>" }`), idempotente.
+Remove o registo de vigilância, o estado atual e a última classificação.
+**Conserva deliberadamente** os sinais históricos (`StoredSignal`) já gerados
+por esse token, para auditoria e para não invalidar dados de backtesting.
+
+### 12.3 Freshness gate
+
+Uma oportunidade nunca aparece como "live" se os dados forem antigos —
+`OPPORTUNITY_CONFIG.freshness.maxLiveSnapshotAgeMs` (6 min por omissão). Isto
+é verificado **duas vezes**: no momento em que o monitor calcula o score, e
+outra vez quando `/api/coins` lê o estado persistido (para o caso de o
+próprio job de monitorização ter parado de correr). O score bruto continua
+disponível para debugging; só a `classification` é forçada para `no_signal`.
+
+### 12.4 Momentum com segmentos não sobrepostos
+
+Substituído o cálculo anterior (retornos cumulativos sobrepostos de 5m/15m/1h)
+por três segmentos independentes — `[0,5m]`, `[5m,15m]`, `[15m,60m]` — convertidos
+em "velocidade" (%/min), para detetar **aceleração real**, não apenas "subiu".
+A janela de "1 minuto" foi eliminada do score: com o monitor a correr a cada
+~1-2min, não há resolução suficiente para a calcular com confiança — fica
+sempre `unavailable`, nunca inventada.
+
+### 12.5 Volume acceleration robusto
+
+O baseline de volume passou a usar a **mediana** (não a média) de snapshots
+entre 90 e 20 minutos atrás (excluindo deliberadamente os últimos ~20min, para
+não deixar o próprio pico contaminar o seu baseline), com dispersão robusta via
+MAD. Exige um mínimo de amostras (`minimumBaselineSamples`, 5 por omissão) —
+sem isso, o componente fica indisponível em vez de arriscar uma leitura ruidosa.
+
+### 12.6 Transaction Buy Imbalance (antigo "buy pressure")
+
+Renomeado porque a DexScreener só dá **contagens** de compras/vendas, não o
+volume monetário de cada lado — não se deve afirmar que se conhece o "fluxo de
+capital". Implementado *shrinkage* Bayesiano: com poucas transações, o rácio é
+puxado fortemente para 50 (neutro); só com 100+ transações o rácio bruto é
+usado quase sem ajuste. Abaixo de `minimumSampleSize` (10), o componente fica
+indisponível.
+
+### 12.7 Market cap deixou de ser uma recompensa
+
+Antes, `marketCap < $1M` dava diretamente uma pontuação alta ao componente de
+estrutura de mercado — recompensando microcaps por serem pequenos, sem
+qualquer condição de qualidade. Agora:
+
+- `marketStructure` mede maturidade/idade do par, com uma penalização (não
+  bónus) quando a capitalização é minúscula **e** a liquidez é fraca ao mesmo
+  tempo (fragilidade estrutural).
+- Criado um campo separado e puramente informativo, `asymmetryPotential`
+  (`low`/`medium`/`high`/`very_high`), que reflete o espaço para movimentos
+  percentuais grandes — mas **não soma ao score principal**.
+
+### 12.8 Liquidez com função gradual
+
+Substituído o corte abrupto ($15k) por uma função contínua por troços
+(`critical` / `veryLow` / `low` / `healthy`, valores em `OPPORTUNITY_CONFIG.liquidity`),
+combinada com o rácio liquidez/capitalização. Já não existe uma fronteira
+absurda tipo "$14.999 inválido, $15.001 aceitável".
+
+### 12.9 Risk Gates (módulo separado)
+
+`src/lib/riskGates.ts` — `evaluateOpportunityRiskGates()` avalia, de forma
+explícita e testável: frescura dos dados, liquidez crítica, confiança
+insuficiente, histórico curto, token muito recente + liquidez baixa, subida
+extrema seguida de deterioração, e amostra de transações pequena. Devolve
+`{ passed, criticalRisks, warnings }`; um `criticalRisk` força a
+classificação para `no_signal` **independentemente do score bruto** — a
+segurança tem sempre prioridade sobre o momentum.
+
+### 12.10 Estado persistido (o dashboard já não recalcula tudo a cada visita)
+
+Novo tipo `CurrentTokenState` (`lib/storage/types.ts`): o job de monitorização
+grava, a cada ciclo, o estado "pronto a mostrar" de cada token (mercado, dados
+on-chain, Opportunity Score já calculado). `GET /api/coins` lê este estado em
+vez de recalcular — abrir o dashboard em vários browsers/dispositivos **não
+multiplica os pedidos às APIs externas**, porque todos leem o mesmo estado no
+Redis. Tokens ainda não processados pelo monitor (ex.: acabados de registar)
+continuam a ter um fallback de leitura ao vivo, para aparecerem imediatamente.
+
+### 12.11 Batching justo (fairness) no monitor
+
+`fairOrder()` em `lib/monitor.ts`: tokens manuais continuam prioritários, mas
+dentro de cada grupo, quem há mais tempo não é processado (`lastProcessedAt`)
+sobe na fila — evita que um número grande de tokens manuais deixe tokens
+descobertos permanentemente sem atualização (starvation).
+
+### 12.12 Alertas: rearm + cooldown
+
+`lib/alerts.ts`: uma oportunidade forte pode voltar a disparar depois de
+regressar a "No Signal" e passar novamente por cima do limiar (rearm
+automático), mas há um cooldown mínimo (`OPPORTUNITY_CONFIG.alerts.cooldownMs`,
+30min por omissão) entre dois disparos do mesmo token — evita repetir alerta
+por variações pequenas (ex.: 84 → 85).
+
+### 12.13 Limpeza e retenção no Redis
+
+TTLs adicionados (`OPPORTUNITY_CONFIG.retention`): estado atual (1h), última
+classificação (1 dia), snapshots (1 dia, além do limite por contagem já
+existente). **Sinais não têm TTL** — são o registo de backtesting e devem
+persistir. Ao remover um token manual, o estado atual e a última classificação
+são apagados explicitamente (ver 12.2).
+
+### 12.14 Infraestrutura de backtesting
+
+`StoredSignal` ganhou campos opcionais: `priceAt5m/15m/1h/6h/24h`,
+`return5m/15m/1h/6h/24h`, `maxFavorableExcursion`, `maxAdverseExcursion`. A
+cada ciclo, o monitor tenta preencher os sinais mais antigos que ainda tenham
+campos em falta (`backfillSignalOutcomes()`), usando os snapshots já
+guardados. **O score original nunca usa estes dados** — só servem para
+avaliação posterior. Não existe ainda um dashboard visual de backtesting, só
+a infraestrutura de dados (consultável via `GET /api/signals`).
+
+### 12.15 Observabilidade
+
+`GET /api/health` — endpoint público sem segredos, devolve `status`
+(`live`/`stale`/`never_run`), idade da última execução, e contagens da última
+corrida do monitor (`tokensConsidered`, `tokensProcessed`, `snapshotsSaved`,
+`signalsGenerated`, `apiFailures`). O cabeçalho do dashboard mostra
+discretamente "Monitor: há Xmin · Redis/Memória".
+
+### 12.16 Configuração central
+
+Todos os pesos, limiares, janelas e cooldowns vivem em
+`src/lib/opportunityConfig.ts` (`OPPORTUNITY_CONFIG`) — nada espalhado pelo
+código como "magic numbers". Pronto para recalibrar depois de haver dados de
+backtesting reais.
+
+### 12.17 Testes
+
+`src/lib/__tests__/opportunity.test.ts` (Vitest) cobre 8 cenários sintéticos
+determinísticos — incluindo os pedidos explicitamente: preço/volume flat →
+No Signal; subida constante sem aceleração → não Very Strong; aceleração +
+volume 8x + boa liquidez → Strong/Very Strong; os mesmos dados com liquidez
+crítica → score bruto alto mas classification No Signal; 2 buys/1 sell → sem
+buy imbalance forte; microcap sem volume/liquidez → sem score alto só por ser
+pequeno; snapshot obsoleto → No Signal (freshness gate); e confirmação de que
+o motor é stateless (a mesma entrada produz sempre a mesma saída — o
+cooldown/rearm vive no `monitor.ts`, não no `opportunity.ts`).
+
+Correr com `npm test`.
+
+### 12.18 Limitações conhecidas desta ronda
+
+- Não existe ainda uma UI dedicada para `asymmetryPotential`, para a
+  distribuição de outcomes de backtesting, nem para o histórico de sinais
+  global — só a infraestrutura de dados (por desenho: esta ronda foi
+  explicitamente sobre robustez, não sobre novas superfícies visuais).
+- O aviso do Vitest sobre `configLoader: 'native'` (ESM em `vitest.config.ts`)
+  é cosmético e não afeta os testes; pode ser resolvido no futuro renomeando
+  o ficheiro para `.mts`.
+- **Não se afirma que o algoritmo é lucrativo.** A infraestrutura de
+  backtesting existe precisamente para poder verificar isso mais tarde, com
+  dados reais acumulados ao longo do tempo — não há essa validação ainda.

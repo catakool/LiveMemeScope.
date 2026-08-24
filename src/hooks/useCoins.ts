@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SourceMeta } from "@/lib/types";
+import type { MonitorHealth } from "@/lib/storage/types";
 import { DiscoveryRecord } from "@/lib/discovery";
 import { evaluateAlerts } from "@/lib/alerts";
 
@@ -12,6 +13,7 @@ export interface CoinsApiResponse {
   generatedAt: string;
   meta: { coingecko: SourceMeta };
   storage?: "redis" | "memory";
+  monitorHealth?: MonitorHealth | null;
   error?: string;
 }
 
