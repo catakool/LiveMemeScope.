@@ -5,6 +5,7 @@ import { CoinScores, DexPairData, MarketData, TokenDefinition, SourceMeta } from
 import { MarketChart } from "@/lib/coingecko";
 import { OpportunityResult } from "@/lib/opportunity";
 import { StoredSignal } from "@/lib/storage";
+import type { DiscoveryRecord } from "@/lib/discovery";
 import { formatUsd, formatPercent, formatDateTime } from "@/lib/format";
 import { TIER_META, CHAIN_LABEL } from "@/lib/tiers";
 import PriceChart from "./PriceChart";
@@ -33,25 +34,72 @@ const RANGES = [
   { label: "1a", days: "365" },
 ];
 
-export default function CoinDetailModal({ coinId, onClose }: { coinId: string; onClose: () => void }) {
+function fallbackDetail(record: DiscoveryRecord): DetailResponse {
+  return {
+    def: record.def,
+    market: record.market,
+    dex: record.dex,
+    chart: null,
+    scores: record.scores,
+    opportunity: record.opportunity ?? null,
+    signals: [],
+    meta: {
+      coingecko: record.meta.coingecko,
+      dexscreener: record.meta.dexscreener,
+      chart: { status: "unavailable", lastUpdated: null, source: "coingecko" },
+    },
+  };
+}
+
+export default function CoinDetailModal({
+  coinId,
+  onClose,
+  fallbackRecord,
+}: {
+  coinId: string;
+  onClose: () => void;
+  fallbackRecord?: DiscoveryRecord | null;
+}) {
   const [data, setData] = useState<DetailResponse | null>(null);
   const [days, setDays] = useState("30");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- inicia o fetch ao mudar de moeda/intervalo; o resultado chega no callback
     setLoading(true);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- limpa o erro anterior ao iniciar um novo pedido
+    setError(null);
     fetch(`/api/coins/${encodeURIComponent(coinId)}?days=${days}`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        const json = await r.json().catch(() => null);
+        if (!r.ok) {
+          const message =
+            json && typeof json.error === "string"
+              ? json.error
+              : `Não foi possível carregar os detalhes deste token (${r.status}).`;
+          throw new Error(message);
+        }
+        return json as DetailResponse;
+      })
       .then((json) => {
-        if (!cancelled) setData(json);
+        if (!cancelled) {
+          setData(json);
+          setError(null);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setData(fallbackRecord ? fallbackDetail(fallbackRecord) : null);
+          setError(err instanceof Error ? err.message : "Não foi possível carregar os detalhes deste token.");
+        }
       })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [coinId, days]);
+  }, [coinId, days, fallbackRecord]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 backdrop-blur-sm p-4 sm:p-8">
@@ -82,6 +130,29 @@ export default function CoinDetailModal({ coinId, onClose }: { coinId: string; o
           <Disclaimer compact />
 
           {loading && <p className="text-sm text-[var(--text-muted)]">A carregar dados…</p>}
+
+          {error && !loading && (
+            <div className="rounded-xl border border-[var(--accent-gold)]/40 bg-[var(--surface)] p-4">
+              <p className="text-sm font-semibold text-[var(--accent-gold)]">
+                {data ? "Detalhe completo temporariamente indisponível." : "Não foi possível abrir esta moeda."}
+              </p>
+              <p className="mt-1 text-xs text-[var(--text-muted)]">{error}</p>
+              <p className="mt-2 text-[10px] text-[var(--text-faint)]">
+                {data
+                  ? "Estou a mostrar os últimos dados que já estavam disponíveis na dashboard. Gráficos e histórico podem ficar N/D até a API/monitor voltar a responder."
+                  : "Isto pode acontecer quando a CoinGecko deixa de devolver temporariamente um token ou antes de o monitor guardar o primeiro snapshot. A dashboard continua operacional."}
+              </p>
+              {!data && (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="mt-3 text-xs px-3 py-1.5 rounded-md border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)]"
+                >
+                  Fechar
+                </button>
+              )}
+            </div>
+          )}
 
           {data && (
             <>

@@ -1,6 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { DiscoveryRecord } from "@/lib/discovery";
+import type { MonitorHealth } from "@/lib/storage/types";
 import { formatUsd, formatPercent } from "@/lib/format";
 import OpportunityBadge from "./OpportunityBadge";
 
@@ -82,30 +84,101 @@ function OpportunityCard({ record, onOpen }: { record: DiscoveryRecord; onOpen: 
   );
 }
 
+function monitorAgeLabel(lastRunAt: string | null): string | null {
+  if (!lastRunAt) return null;
+  const ageMs = Date.now() - new Date(lastRunAt).getTime();
+  if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 1) return "agora mesmo";
+  if (minutes < 60) return `há ${minutes} min`;
+  return `há ${Math.floor(minutes / 60)} h`;
+}
+
 export default function LiveOpportunities({
   records,
   onOpen,
+  monitorHealth,
+  storageKind,
 }: {
   records: DiscoveryRecord[];
   onOpen: (id: string) => void;
+  monitorHealth?: MonitorHealth | null;
+  storageKind?: "redis" | "memory";
 }) {
-  if (records.length === 0) return null;
+  const [monitorStatus, setMonitorStatus] = useState<{ label: string | null; live: boolean }>({
+    label: null,
+    live: false,
+  });
+
+  useEffect(() => {
+    const update = () => {
+      const label = monitorAgeLabel(monitorHealth?.lastRunAt ?? null);
+      let live = false;
+      if (monitorHealth) {
+        const ageMs = Date.now() - new Date(monitorHealth.lastRunAt).getTime();
+        live = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 10 * 60_000;
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- estado de frescura depende do relógio do browser e é atualizado periodicamente
+      setMonitorStatus({ label, live });
+    };
+    update();
+    const timer = window.setInterval(update, 30_000);
+    return () => window.clearInterval(timer);
+  }, [monitorHealth]);
 
   return (
     <div className="rounded-2xl border border-[var(--accent-gold)]/30 bg-gradient-to-b from-[var(--accent-gold)]/5 to-transparent p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <span className="text-lg">🚨</span>
-        <h2 className="font-display font-bold text-base">Live Opportunities</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span className="text-lg">🚨</span>
+          <div>
+            <h2 className="font-display font-bold text-base">Live Opportunities</h2>
+            <p className="text-[10px] text-[var(--text-faint)]">
+              {records.length} oportunidade{records.length === 1 ? "" : "s"} ativa{records.length === 1 ? "" : "s"} agora
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-[10px]">
+          <span className={`rounded-full border px-2 py-1 ${
+            monitorStatus.live
+              ? "border-[var(--accent-opportunity)]/40 text-[var(--accent-opportunity)]"
+              : "border-[var(--accent-gold)]/40 text-[var(--accent-gold)]"
+          }`}>
+            {monitorStatus.live ? "● Monitor LIVE" : "○ Monitor a aguardar"}
+          </span>
+          <span className="rounded-full border border-[var(--border)] px-2 py-1 text-[var(--text-muted)]">
+            {storageKind === "redis" ? "Redis conectado" : storageKind === "memory" ? "Memória temporária" : "Storage N/D"}
+          </span>
+          {monitorStatus.label && (
+            <span className="text-[var(--text-faint)]">último scan {monitorStatus.label}</span>
+          )}
+        </div>
       </div>
       <p className="text-xs text-[var(--text-muted)]">
         Esta secção identifica condições de mercado que historicamente podem associar-se a momentum. Não prevê o
         futuro nem garante lucros — são apenas condições atuais, com as razões explicadas em cada cartão.
       </p>
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {records.map((r) => (
-          <OpportunityCard key={r.def.tokenKey} record={r} onOpen={() => onOpen(r.def.tokenKey)} />
-        ))}
-      </div>
+
+      {records.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-[var(--border)] bg-[var(--surface)]/60 p-4">
+          <p className="text-sm font-medium">Nenhuma oportunidade forte neste momento.</p>
+          <p className="mt-1 text-xs text-[var(--text-muted)]">
+            O motor continua a monitorizar o mercado. No início, precisa de acumular snapshots suficientes para confirmar
+            aceleração de preço, anomalia de volume e qualidade de liquidez antes de promover uma moeda para esta secção.
+          </p>
+          {monitorHealth && (
+            <p className="mt-2 text-[10px] text-[var(--text-faint)]">
+              Último ciclo: {monitorHealth.tokensProcessed} tokens processados · {monitorHealth.snapshotsSaved} snapshots guardados · {monitorHealth.apiFailures} falhas de API.
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {records.map((r) => (
+            <OpportunityCard key={r.def.tokenKey} record={r} onOpen={() => onOpen(r.def.tokenKey)} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

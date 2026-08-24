@@ -83,7 +83,12 @@ export default function Home() {
 
             <MarketSummary records={records} />
 
-            <LiveOpportunities records={data.liveOpportunities} onOpen={setOpenCoin} />
+            <LiveOpportunities
+              records={data.liveOpportunities}
+              onOpen={setOpenCoin}
+              monitorHealth={data.monitorHealth}
+              storageKind={data.storage}
+            />
 
             <Filters value={filters} onChange={setFilters} />
 
@@ -145,7 +150,13 @@ export default function Home() {
         MemeScope — dados via CoinGecko e DexScreener. Não é aconselhamento financeiro.
       </footer>
 
-      {openCoin && <CoinDetailModal coinId={openCoin} onClose={() => setOpenCoin(null)} />}
+      {openCoin && (
+        <CoinDetailModal
+          coinId={openCoin}
+          fallbackRecord={records.find((r) => r.def.tokenKey === openCoin) ?? null}
+          onClose={() => setOpenCoin(null)}
+        />
+      )}
     </div>
   );
 }
