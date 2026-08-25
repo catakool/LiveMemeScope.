@@ -21,15 +21,28 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/[$#]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+const AMBIGUOUS_SYMBOLS = new Set([
+  "one", "gas", "arb", "op", "near", "link", "uni", "cake", "ray", "people",
+  "good", "wen", "dog", "cat", "meme", "token", "coin",
+]);
+
 function relatedTokens(article: TrendArticle, records: DiscoveryRecord[]): DiscoveryRecord[] {
-  const haystack = ` ${normalize(article.title)} `;
+  const normalizedTitle = ` ${normalize(article.title)} `;
+  const rawTitle = article.title.toLowerCase();
+
   return records
     .filter((r) => {
+      // Full project names are substantially safer than ticker-only matching.
       const name = normalize(r.def.name);
-      const symbol = normalize(r.def.symbol);
-      const symbolMatch = symbol.length >= 3 && haystack.includes(` ${symbol} `);
-      const nameMatch = name.length >= 4 && haystack.includes(` ${name} `);
-      return symbolMatch || nameMatch;
+      const nameMatch = name.length >= 4 && normalizedTitle.includes(` ${name} `);
+      if (nameMatch) return true;
+
+      // A ticker by itself is ambiguous (PEPE/DOG/CAT/etc.). Only accept it
+      // when the article explicitly uses a cashtag such as $DOGE/$PEPE.
+      const symbol = r.def.symbol.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (symbol.length < 2 || AMBIGUOUS_SYMBOLS.has(symbol)) return false;
+      const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\$${escaped}(?![a-z0-9])`, "i").test(rawTitle);
     })
     .slice(0, 4);
 }
@@ -78,7 +91,7 @@ function TrendCard({ article, records, onOpen }: { article: TrendArticle; record
 
       {linked.length > 0 && (
         <div>
-          <div className="text-[10px] uppercase tracking-wide text-[var(--text-faint)] mb-1.5">Tokens relacionados na dashboard</div>
+          <div className="text-[10px] uppercase tracking-wide text-[var(--text-faint)] mb-1.5">Tokens relacionados (correspondência verificada)</div>
           <div className="flex flex-wrap gap-1.5">
             {linked.map((r) => (
               <button
@@ -172,7 +185,7 @@ export default function TrendsPanel({ records, onOpen }: { records: DiscoveryRec
         <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4">
           <div className="flex items-center justify-between gap-2 mb-2">
             <div className="text-[10px] uppercase tracking-wide text-[var(--text-faint)]">Em tendência no mercado</div>
-            <div className="text-[10px] text-[var(--text-faint)]">CoinGecko trending + discovery</div>
+            <div className="text-[10px] text-[var(--text-faint)]">CoinGecko trending · identidade verificada</div>
           </div>
           <div className="flex flex-wrap gap-2">
             {marketTrending.map((record) => (

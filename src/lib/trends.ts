@@ -47,7 +47,11 @@ const GDELT_ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc";
 
 // Mantemos a pesquisa relativamente ampla. A classificação fina é feita localmente
 // para não transformar uma palavra solta numa recomendação de investimento.
-const SEARCH_QUERY = '(cryptocurrency OR crypto OR bitcoin OR ethereum OR solana OR dogecoin OR memecoin OR "meme coin" OR "meme token")';
+const SEARCH_QUERIES = [
+  'cryptocurrency',
+  '(bitcoin OR ethereum OR solana OR dogecoin OR memecoin)',
+  '("meme coin" OR "meme token" OR crypto)',
+] as const;
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -159,34 +163,80 @@ function normalizeArticles(json: GdeltResponse): TrendArticle[] {
   });
 }
 
-async function fetchGdelt(): Promise<TrendsFeed> {
+async function fetchGdeltQuery(query: string, timespan = "12h"): Promise<TrendArticle[]> {
   const url = new URL(GDELT_ENDPOINT);
-  url.searchParams.set("query", SEARCH_QUERY);
+  url.searchParams.set("query", query);
   url.searchParams.set("mode", "artlist");
   url.searchParams.set("maxrecords", "75");
-  url.searchParams.set("timespan", "12h");
+  url.searchParams.set("timespan", timespan);
   url.searchParams.set("sort", "datedesc");
   url.searchParams.set("format", "json");
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
+  const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "MemeScope/1.0 (+educational market dashboard)" },
+      headers: {
+        "Accept": "application/json,text/plain;q=0.9,*/*;q=0.1",
+        "User-Agent": "MemeScope/1.0",
+      },
       signal: controller.signal,
       cache: "no-store",
     });
     if (!res.ok) throw new Error(`GDELT_HTTP_${res.status}`);
-    const json = (await res.json()) as GdeltResponse;
-    return {
-      articles: normalizeArticles(json),
-      generatedAt: new Date().toISOString(),
-      source: "gdelt",
-      status: "live",
-    };
+
+    // GDELT occasionally returns an HTML/text error body with HTTP 200.
+    // Read text first so one malformed response does not kill all retries.
+    const body = await res.text();
+    let json: GdeltResponse;
+    try {
+      json = JSON.parse(body) as GdeltResponse;
+    } catch {
+      throw new Error("GDELT_INVALID_JSON");
+    }
+    return normalizeArticles(json);
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchGdelt(): Promise<TrendsFeed> {
+  const merged = new Map<string, TrendArticle>();
+  let successfulRequests = 0;
+
+  // Smaller independent queries are intentionally used instead of one large
+  // boolean expression. If one GDELT query is throttled/rejected, the radar
+  // can still return articles from the others.
+  for (const query of SEARCH_QUERIES) {
+    try {
+      const articles = await fetchGdeltQuery(query);
+      successfulRequests += 1;
+      for (const article of articles) {
+        const key = `${article.title.toLowerCase()}|${article.url}`;
+        const current = merged.get(key);
+        if (!current || article.strength > current.strength) merged.set(key, article);
+      }
+    } catch {
+      // Continue with the next query. getTrendsFeed handles total failure.
+    }
+  }
+
+  if (successfulRequests === 0) throw new Error("GDELT_ALL_QUERIES_FAILED");
+
+  const articles = [...merged.values()]
+    .sort((a, b) => {
+      const timeA = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+      const timeB = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+      return b.strength - a.strength || timeB - timeA;
+    })
+    .slice(0, 100);
+
+  return {
+    articles,
+    generatedAt: new Date().toISOString(),
+    source: "gdelt",
+    status: "live",
+  };
 }
 
 export async function getTrendsFeed(): Promise<TrendsFeed> {

@@ -1,3 +1,11 @@
+# MemeScope v9 fixed — production fixes
+
+- Tendências: GDELT now uses multiple smaller queries with partial-failure tolerance instead of one all-or-nothing query.
+- Tendências: safer article→token association. Plain ambiguous ticker text no longer links a token; cashtags or full project names are required.
+- Coin details: the modal forwards the already-known CoinGecko ID and the API verifies it against the exact contract address before using it.
+- Coin details: DexScreener `dexId` is no longer incorrectly displayed as a token symbol (e.g. “uniswap”).
+- Existing Redis/Cron/Opportunity Engine behavior is preserved.
+
 # MemeScope — final hardening (ChatGPT)
 
 Esta versão parte de `memescope-para-github_6.zip` e aplica as correções finais de fiabilidade discutidas na auditoria.

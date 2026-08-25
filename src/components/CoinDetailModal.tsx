@@ -71,7 +71,13 @@ export default function CoinDetailModal({
     setLoading(true);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- limpa o erro anterior ao iniciar um novo pedido
     setError(null);
-    fetch(`/api/coins/${encodeURIComponent(coinId)}?days=${days}`)
+    fetch(
+      `/api/coins/${encodeURIComponent(coinId)}?days=${days}${
+        fallbackRecord?.def.coingeckoId
+          ? `&cg=${encodeURIComponent(fallbackRecord.def.coingeckoId)}`
+          : ""
+      }`
+    )
       .then(async (r) => {
         const json = await r.json().catch(() => null);
         if (!r.ok) {

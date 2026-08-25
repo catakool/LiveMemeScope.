@@ -43,6 +43,25 @@ export async function GET(
     coingeckoId = parsed.coingeckoId;
   }
 
+  // A dashboard may already know the CoinGecko identity even when tokenKey is
+  // chain:address. Accept that identity only after verifying that CoinGecko
+  // resolves to the SAME contract address. This prevents symbol/name matching
+  // from opening an unrelated token.
+  const cgHint = searchParams.get("cg")?.trim() || null;
+  if (!coingeckoId && cgHint) {
+    try {
+      const hintedPlatform = await getCoinPlatformDetail(cgHint);
+      const hintedAddress = hintedPlatform.data.contractAddress?.toLowerCase() ?? null;
+      const expectedAddress = contractAddress?.toLowerCase() ?? null;
+      if (hintedAddress && expectedAddress && hintedAddress === expectedAddress) {
+        coingeckoId = cgHint;
+        chain = chain ?? hintedPlatform.data.chain;
+      }
+    } catch {
+      // Ignore an unverifiable hint; DexScreener/persisted data remain usable.
+    }
+  }
+
   // 2) Dados da CoinGecko, só se tivermos um coingeckoId.
   let market = null;
   let cgMeta: SourceMeta = { status: "unavailable", lastUpdated: null, source: "coingecko" };
@@ -100,8 +119,8 @@ export async function GET(
   const def: TokenDefinition = {
     tokenKey,
     coingeckoId,
-    symbol: registryHit?.symbol ?? market?.symbol ?? dexRes.data?.dexId ?? "TOKEN",
-    name: registryHit?.name ?? market?.name ?? registryHit?.symbol ?? "Token",
+    symbol: registryHit?.symbol ?? market?.symbol ?? "TOKEN",
+    name: registryHit?.name ?? market?.name ?? (coingeckoId ? coingeckoId : "Token DEX"),
     chain: resolvedChain,
     contractAddress,
     riskTier: deriveRiskTier(market?.marketCap ?? null),
