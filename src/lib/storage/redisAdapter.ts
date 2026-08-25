@@ -3,6 +3,7 @@ import {
   CurrentTokenState,
   LastClassificationState,
   MonitorHealth,
+  RadarCandidateState,
   Snapshot,
   StorageAdapter,
   StoredSignal,
@@ -25,6 +26,8 @@ const LAST_CLASS_PREFIX = "memescope:last-classification:";
 const CURRENT_STATE_PREFIX = "memescope:current-state:";
 const CURRENT_STATE_INDEX = "memescope:current-state:index"; // set com todas as tokenKeys que têm estado guardado
 const MONITOR_HEALTH_KEY = "memescope:monitor-health";
+const RADAR_PREFIX = "memescope:radar:candidate:";
+const RADAR_INDEX = "memescope:radar:index";
 
 function getUrl(): string | undefined {
   return process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
@@ -207,6 +210,18 @@ export class RedisStorageAdapter implements StorageAdapter {
     const redis = getClient();
     await redis.del(`${CURRENT_STATE_PREFIX}${tokenKey}`);
     await redis.srem(CURRENT_STATE_INDEX, tokenKey);
+  }
+
+  async setRadarCandidate(state: RadarCandidateState, ttlSeconds?: number): Promise<void> {
+    const redis = getClient(); const key = `${RADAR_PREFIX}${state.tokenKey}`;
+    if (ttlSeconds) await redis.set(key, state, { ex: ttlSeconds }); else await redis.set(key, state);
+    await redis.sadd(RADAR_INDEX, state.tokenKey);
+  }
+  async getRadarCandidate(tokenKey: string): Promise<RadarCandidateState | null> { return (await getClient().get<RadarCandidateState>(`${RADAR_PREFIX}${tokenKey}`)) ?? null; }
+  async listRadarCandidates(): Promise<RadarCandidateState[]> {
+    const redis = getClient(); const keys = await redis.smembers(RADAR_INDEX); if (!keys?.length) return [];
+    const vals = await Promise.all(keys.map((k) => this.getRadarCandidate(k))); const stale = keys.filter((_, i) => vals[i] === null);
+    if (stale.length) await redis.srem(RADAR_INDEX, ...stale); return vals.filter((v): v is RadarCandidateState => v !== null);
   }
 
   async setMonitorHealth(health: MonitorHealth): Promise<void> {

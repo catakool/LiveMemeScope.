@@ -61,3 +61,12 @@ npm run build
 - Secção “Em tendência no mercado” reaproveita o CoinGecko Trending já existente no Discovery Engine.
 - A v9 **não injeta notícias diretamente no Opportunity Score**: primeiro recolhemos/observamos os catalisadores e evitamos que uma notícia negativa ou uma menção isolada crie artificialmente um sinal de compra.
 - X/Twitter e Reddit permanecem preparados para uma iteração posterior com fontes oficiais.
+
+# MemeScope v11 — New Token Radar
+- Nova terceira aba `🚀 New Token Radar`.
+- Descoberta server-side via feeds públicos de perfis/boosts recentes da DexScreener e resolução de pares em batch.
+- Hard gates: par <48h, liquidez >=$10k, volume 5m >=$1.5k, >=10 transações/5m.
+- Early Momentum Score: momentum 5m/1h + volume/liquidez + atividade + buy imbalance + idade. Boost pago quase não aumenta score e é marcado como risco.
+- Estados Emerging / Breakout / Explosive com critérios progressivamente mais exigentes.
+- Redis guarda firstDetectedAt e firstDetectedPrice por 72h, para medir retorno desde a deteção.
+- O cron atualiza o radar mesmo com a página fechada. Não há compra automática nem adição automática à watchlist.

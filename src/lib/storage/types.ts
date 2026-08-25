@@ -118,6 +118,16 @@ export interface CurrentTokenState {
   opportunityRaw: unknown; // OpportunityResult | null
 }
 
+
+export interface RadarCandidateState {
+  tokenKey: string; chain: Chain; address: string; name: string; symbol: string; pairAddress: string | null; dexId: string | null;
+  pairCreatedAt: string; firstDetectedAt: string; firstDetectedPrice: number | null; lastSeenAt: string; price: number | null;
+  liquidityUsd: number | null; marketCapOrFdv: number | null; marketCapIsFdv: boolean; volumeM5: number | null; volumeH1: number | null;
+  buysM5: number | null; sellsM5: number | null; priceChangeM5: number | null; priceChangeH1: number | null;
+  source: "latest_profile" | "boosted" | "both"; boostAmount: number | null; earlyMomentumScore: number;
+  classification: "explosive" | "breakout" | "emerging"; reasons: string[]; risks: string[];
+}
+
 /** Diagnóstico do job de monitorização, para o endpoint de health (Fase 17). */
 export interface MonitorHealth {
   lastRunAt: string; // ISO
@@ -155,6 +165,10 @@ export interface StorageAdapter {
   getCurrentTokenState(tokenKey: string): Promise<CurrentTokenState | null>;
   listCurrentTokenStates(): Promise<CurrentTokenState[]>;
   deleteCurrentTokenState(tokenKey: string): Promise<void>;
+
+  setRadarCandidate(state: RadarCandidateState, ttlSeconds?: number): Promise<void>;
+  getRadarCandidate(tokenKey: string): Promise<RadarCandidateState | null>;
+  listRadarCandidates(): Promise<RadarCandidateState[]>;
 
   setMonitorHealth(health: MonitorHealth): Promise<void>;
   getMonitorHealth(): Promise<MonitorHealth | null>;

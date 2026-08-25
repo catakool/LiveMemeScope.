@@ -17,9 +17,10 @@ import AddTokenPanel from "@/components/AddTokenPanel";
 import CoinDetailModal from "@/components/CoinDetailModal";
 import LiveOpportunities from "@/components/LiveOpportunities";
 import TrendsPanel from "@/components/TrendsPanel";
+import NewTokenRadar from "@/components/NewTokenRadar";
 
 type ViewMode = "cards" | "table";
-type MainTab = "dashboard" | "trends";
+type MainTab = "dashboard" | "trends" | "radar";
 
 export default function Home() {
   const { data, error, loading } = useCoins();
@@ -74,6 +75,12 @@ export default function Home() {
             className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${mainTab === "trends" ? "bg-[var(--surface-2)] text-[var(--accent-info)]" : "text-[var(--text-muted)] hover:text-[var(--text)]"}`}
           >
             Tendências
+          </button>
+          <button
+            onClick={() => setMainTab("radar")}
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${mainTab === "radar" ? "bg-[var(--surface-2)] text-[var(--accent-gold)]" : "text-[var(--text-muted)] hover:text-[var(--text)]"}`}
+          >
+            🚀 New Token Radar
           </button>
         </div>
 
@@ -165,8 +172,10 @@ export default function Home() {
           </>
         )}
           </>
-        ) : (
+        ) : mainTab === "trends" ? (
           <TrendsPanel records={records} onOpen={setOpenCoin} />
+        ) : (
+          <NewTokenRadar />
         )}
       </main>
 

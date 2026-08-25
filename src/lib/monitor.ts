@@ -7,6 +7,7 @@ import { OPPORTUNITY_CONFIG } from "./opportunityConfig";
 import { getStorage, Snapshot, StoredSignal, WatchedTokenRecord } from "./storage";
 import { MarketData, DexPairData } from "./types";
 import { NULL_CATALYST_PROVIDER } from "./catalystProvider";
+import { refreshNewTokenRadar } from "./newTokenRadar";
 
 // ---------------------------------------------------------------------------
 // Job de monitorização (Fase 4, com melhorias de hardening: fairness,
@@ -175,6 +176,8 @@ export async function runMonitorCycle(): Promise<MonitorCycleSummary> {
   const start = Date.now();
   const storage = getStorage();
   const errors: string[] = [];
+
+  try { await refreshNewTokenRadar(); } catch (err) { errors.push(`radar: ${(err as Error).message}`); }
 
   let discoveryRecords: Awaited<ReturnType<typeof getDiscoveryFeed>>["records"] = [];
   try {

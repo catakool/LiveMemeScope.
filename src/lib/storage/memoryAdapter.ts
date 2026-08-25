@@ -2,6 +2,7 @@ import {
   CurrentTokenState,
   LastClassificationState,
   MonitorHealth,
+  RadarCandidateState,
   Snapshot,
   StorageAdapter,
   StoredSignal,
@@ -23,6 +24,7 @@ const signalsByToken = new Map<string, StoredSignal[]>();
 const signalsAll: StoredSignal[] = [];
 const lastClassification = new Map<string, LastClassificationState>();
 const currentStates = new Map<string, CurrentTokenState>();
+const radarCandidates = new Map<string, RadarCandidateState>();
 let monitorHealth: MonitorHealth | null = null;
 
 let warned = false;
@@ -140,6 +142,10 @@ export class MemoryStorageAdapter implements StorageAdapter {
   async deleteCurrentTokenState(tokenKey: string): Promise<void> {
     currentStates.delete(tokenKey);
   }
+
+  async setRadarCandidate(state: RadarCandidateState): Promise<void> { radarCandidates.set(state.tokenKey, state); }
+  async getRadarCandidate(tokenKey: string): Promise<RadarCandidateState | null> { return radarCandidates.get(tokenKey) ?? null; }
+  async listRadarCandidates(): Promise<RadarCandidateState[]> { return Array.from(radarCandidates.values()); }
 
   async setMonitorHealth(health: MonitorHealth): Promise<void> {
     monitorHealth = health;
