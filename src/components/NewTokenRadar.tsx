@@ -71,6 +71,33 @@ function ContinuationBadge({ c }: { c: RadarCandidate }) {
   return <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${cls}`}>↗ Continuation {c.continuationScore.toFixed(0)}</span>;
 }
 
+function SecurityBadge({ c }: { c: RadarCandidate }) {
+  const s=c.securityAssessment;
+  if(!s || s.risk==="unknown") return <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--text-muted)]">🛡️ Security: N/D</span>;
+  const cls=s.risk==="critical"?"border-[var(--accent-risk)] text-[var(--accent-risk)]":s.risk==="high"?"border-[var(--accent-risk)]/60 text-[var(--accent-risk)]":s.risk==="medium"?"border-[var(--accent-gold)]/50 text-[var(--accent-gold)]":"border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]";
+  return <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${cls}`}>🛡️ Security {s.score ?? "N/D"} · {s.risk.toUpperCase()}</span>;
+}
+
+function SecurityPanel({c}:{c:RadarCandidate}){
+  const s=c.securityAssessment;
+  if(c.chain!=="solana") return null;
+  if(!s) return <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-2 text-[10px] text-[var(--text-muted)]">🛡️ Security ainda não analisada. O monitor verifica os candidatos Solana por prioridade.</div>;
+  return <div className={`rounded-lg border p-3 space-y-2 ${s.critical?"border-[var(--accent-risk)]/50 bg-[var(--accent-risk-dim)]/30":"border-[var(--border)] bg-[var(--surface-2)]"}`}>
+    <div className="flex flex-wrap justify-between gap-2"><div><b className={s.critical?"text-[var(--accent-risk)]":"text-[var(--text)]"}>🛡️ Security Engine</b><div className="text-[9px] text-[var(--text-faint)]">GoPlus + Solscan · cobertura {s.completeness}%</div></div><div className="font-data font-bold">{s.score===null?"N/D":`${s.score}/100`}</div></div>
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px]">
+      <div><span className="text-[var(--text-faint)]">Holders</span><div className="font-data">{s.holderCount?.toLocaleString() ?? "N/D"}</div></div>
+      <div><span className="text-[var(--text-faint)]">Top 1</span><div className="font-data">{s.top1HolderPercent===null?"N/D":`${s.top1HolderPercent.toFixed(1)}%`}</div></div>
+      <div><span className="text-[var(--text-faint)]">Top holders</span><div className="font-data">{s.top10HolderPercent===null?"N/D":`${s.top10HolderPercent.toFixed(1)}%`}</div></div>
+      <div><span className="text-[var(--text-faint)]">LP locked</span><div className="font-data">{s.lpLockedPercent===null?"N/D":`${s.lpLockedPercent.toFixed(0)}%`}</div></div>
+    </div>
+    <div className="flex flex-wrap gap-2 text-[9px] text-[var(--text-muted)]"><span>Mintable: <b>{s.mintable===null?"N/D":s.mintable?"SIM ⚠️":"não"}</b></span><span>Freezable: <b>{s.freezable===null?"N/D":s.freezable?"SIM ⛔":"não"}</b></span><span>GoPlus: {s.providers.goplus.status}</span><span>Solscan: {s.providers.solscan.status}</span></div>
+    {!!s.blockers.length&&<div className="text-[10px] text-[var(--accent-risk)]"><b>Bloqueadores:</b> {s.blockers.join(" · ")}</div>}
+    {!!s.warnings.length&&<div className="text-[10px] text-[var(--accent-gold)]"><b>Avisos:</b> {s.warnings.slice(0,3).join(" · ")}</div>}
+    {!!s.positives.length&&<div className="text-[10px] text-[var(--accent-opportunity)]"><b>Positivos:</b> {s.positives.slice(0,3).join(" · ")}</div>}
+    <div className="text-[9px] text-[var(--text-faint)]">Automático e incompleto: reduz risco, não garante que o token seja seguro.</div>
+  </div>;
+}
+
 function Card({ c }: { c: RadarCandidate }) {
   const m = META[c.classification];
   const tx = (c.buysM5 ?? 0) + (c.sellsM5 ?? 0);
@@ -92,6 +119,7 @@ function Card({ c }: { c: RadarCandidate }) {
             <SourceBadge c={c} />
             <TransactionQualityBadge c={c} />
             <ContinuationBadge c={c} />
+            <SecurityBadge c={c} />
             {c.isPreCoinGecko && <span className="rounded-full border border-[var(--accent-gold)]/45 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-gold)]">Pre-CoinGecko watch</span>}
           </div>
           <div className="mt-1 text-[10px] text-[var(--text-faint)]">
@@ -196,12 +224,14 @@ function Card({ c }: { c: RadarCandidate }) {
         </div>
       )}
 
+      <SecurityPanel c={c} />
+
       {!!c.reasons.length && <div><div className="text-[10px] uppercase tracking-wider text-[var(--accent-opportunity)] mb-1">Por que apareceu?</div><ul className="space-y-1 text-[11px] text-[var(--text-muted)]">{c.reasons.slice(0, 5).map((r) => <li key={r}>• {r}</li>)}</ul></div>}
       {!!c.risks.length && <div className="rounded-lg border border-[var(--accent-risk)]/25 bg-[var(--accent-risk-dim)]/30 p-2"><div className="text-[10px] uppercase tracking-wider text-[var(--accent-risk)] mb-1">Risco</div><div className="text-[10px] text-[var(--text-muted)]">{c.risks.slice(0, 3).join(" · ")}</div></div>}
 
       <div className="flex items-center justify-between gap-2 pt-1">
         <code className="text-[9px] text-[var(--text-faint)] truncate max-w-[65%]" title={c.address}>{c.address}</code>
-        <a href={c.dexUrl} target="_blank" rel="noreferrer" className="text-xs rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[var(--accent-info)] hover:border-[var(--accent-info)]/60">Ver na DexScreener ↗</a>
+        <div className="flex gap-1.5">{c.chain === "solana" && <a href={`https://solscan.io/token/${c.address}`} target="_blank" rel="noreferrer" className="text-xs rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[var(--text-muted)] hover:border-[var(--accent-info)]/60">Solscan ↗</a>}<a href={c.dexUrl} target="_blank" rel="noreferrer" className="text-xs rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[var(--accent-info)] hover:border-[var(--accent-info)]/60">DexScreener ↗</a></div>
       </div>
     </article>
   );
@@ -272,7 +302,7 @@ export default function NewTokenRadar() {
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2"><span className="text-xl">🚀</span><h2 className="font-display text-lg font-semibold">New Token Radar</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] ${feed?.status === "live" ? "border-[var(--accent-opportunity)]/40 text-[var(--accent-opportunity)]" : "border-[var(--accent-risk)]/40 text-[var(--accent-risk)]"}`}>{feed?.status === "live" ? "LIVE" : "INDISPONÍVEL"}</span></div>
-          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> mostra apenas tokens que passam os gates agora. O <b>Continuation Score</b> tenta separar “está a subir” de “tem condições para continuar alguns minutos”. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato. O score também penaliza atividade inflacionada quando há muitas transações para pouco volume real.</p>
+          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> mostra apenas tokens que passam os gates agora. O <b>Continuation Score</b> tenta separar “está a subir” de “tem condições para continuar alguns minutos”. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato. O score também penaliza atividade inflacionada. Em Solana, o Security Engine cruza GoPlus + Solscan e pode retirar um token do Live Radar quando encontra um blocker crítico.</p>
         </div>
         <div className="grid grid-cols-4 gap-2 text-center shrink-0">
           <div className="rounded-lg bg-[var(--surface-2)] px-3 py-2"><div className="font-data font-bold text-[var(--accent-risk)]">{count("explosive")}</div><div className="text-[9px] text-[var(--text-faint)]">EXPLOSIVE</div></div>

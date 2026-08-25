@@ -586,3 +586,15 @@ O New Token Radar usa **DexScreener para descoberta precoce** e verifica depois 
 A aplicação NÃO assume que a presença na CoinGecko causa subida. Quando a MemeScope observou previamente um token como DEX-only e depois o confirma na CoinGecko, guarda esse evento e mede retornos +15m/+1h/+6h/+24h. O painel `CoinGecko Listing Effect` apresenta mediana, percentagem de casos positivos e tamanho da amostra. `coingeckoFirstSeenAt` significa **primeira confirmação pela MemeScope**, não data oficial de listing da CoinGecko.
 
 Para respeitar rate limits, o Radar faz no máximo 4 verificações de contrato CoinGecko por ciclo e candidatos DEX-only só voltam a ser verificados depois do intervalo persistido.
+
+
+## V16 — Security Engine (Solana)
+
+O New Token Radar cruza dados de segurança da GoPlus com dados on-chain da Solscan. O security score é separado do Early Momentum e do Continuation Score. Um blocker crítico pode remover o token do Live Radar.
+
+Variáveis opcionais server-side:
+
+- `SOLSCAN_API_KEY`: chave da API Solscan. O plano Free é suficiente para começar; a app limita os checks e persiste resultados para poupar quota.
+- `GOPLUS_ACCESS_TOKEN`: opcional. A app tenta o endpoint gratuito sem token e usa Bearer quando configurado.
+
+Nunca colocar estas chaves em componentes client-side ou no GitHub. Em Vercel use Settings → Environment Variables.

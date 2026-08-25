@@ -1,3 +1,16 @@
+# MemeScope v16 — Solana Security Engine
+
+- Integração server-side com **GoPlus Token Security API for Solana**.
+- Integração opcional com **Solscan API** (`SOLSCAN_API_KEY`) para holders, concentração e mint/freeze authority.
+- Security Score 0–100 separado de Momentum/Continuation.
+- Risk levels: LOW / MEDIUM / HIGH / CRITICAL.
+- Critical Security Gate pode retirar automaticamente uma moeda do Live Radar, sem apagar o score bruto.
+- Verifica mintability, freeze/close/balance authorities quando disponíveis, holder concentration, creator concentration, LP locking e autoridades potencialmente maliciosas.
+- Máximo de 2 security checks por ciclo + persistência/recheck em Redis para não queimar limites de API.
+- Sem Solscan key, MemeScope continua funcional com assessment parcial.
+- Novo link direto para Solscan em candidatos Solana.
+- Nenhuma API key é enviada ao browser.
+
 # MemeScope v15 — Momentum Continuation
 
 - `Continuation Score` separado do `Early Momentum Score`.

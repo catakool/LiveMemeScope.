@@ -119,6 +119,39 @@ export interface CurrentTokenState {
 }
 
 
+
+export type SecurityRiskLevel = "low" | "medium" | "high" | "critical" | "unknown";
+
+export interface SecurityProviderState {
+  status: "live" | "not_configured" | "unavailable";
+  detail: string | null;
+}
+
+/** Resumo persistível: nunca contém API keys nem payloads crus dos providers. */
+export interface SecurityAssessment {
+  checkedAt: string;
+  score: number | null;
+  risk: SecurityRiskLevel;
+  critical: boolean;
+  completeness: number;
+  blockers: string[];
+  warnings: string[];
+  positives: string[];
+  providers: { goplus: SecurityProviderState; solscan: SecurityProviderState };
+  holderCount: number | null;
+  top1HolderPercent: number | null;
+  top10HolderPercent: number | null;
+  creatorPercent: number | null;
+  lpLockedPercent: number | null;
+  mintAuthority: string | null;
+  freezeAuthority: string | null;
+  mintable: boolean | null;
+  freezable: boolean | null;
+  closable: boolean | null;
+  balanceMutable: boolean | null;
+  metadataMutable: boolean | null;
+}
+
 export interface RadarCandidateState {
   tokenKey: string;
   chain: Chain;
@@ -177,6 +210,10 @@ export interface RadarCandidateState {
   continuationReturn60m?: number | null;
   continuationMfe60m?: number | null;
   continuationMae60m?: number | null;
+
+  /** Security Engine (Solana): GoPlus + Solscan, persistido para respeitar rate limits. */
+  securityAssessment?: SecurityAssessment | null;
+  nextSecurityCheckAt?: string | null;
 
   /** Como o token apareceu no feed da DexScreener. */
   source: "latest_profile" | "boosted" | "both";

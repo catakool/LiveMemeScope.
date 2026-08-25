@@ -1,7 +1,8 @@
 import { cacheGet, cacheSet, withCoalescing } from "./cache";
 import { resolveCoinGeckoByContract } from "./coingecko";
 import { Chain } from "./types";
-import { getStorage, RadarCandidateState } from "./storage";
+import { getStorage, RadarCandidateState, SecurityAssessment } from "./storage";
+import { assessSolanaTokenSecurity } from "./securityEngine";
 
 const BASE = "https://api.dexscreener.com";
 const CACHE_KEY = "new-token-radar:v4";
@@ -13,6 +14,9 @@ const MAX_PAIR_AGE_MINUTES = 7 * 24 * 60;
 const MAX_COINGECKO_CHECKS_PER_REFRESH = 4;
 const COINGECKO_RECHECK_MS = 15 * 60_000;
 const COINGECKO_ERROR_RECHECK_MS = 30 * 60_000;
+const MAX_SECURITY_CHECKS_PER_REFRESH = 2;
+const SECURITY_RECHECK_MS = 30 * 60_000;
+const SECURITY_CRITICAL_RECHECK_MS = 10 * 60_000;
 
 const SUPPORTED_CHAINS: Record<string, Chain> = {
   solana: "solana",
@@ -136,6 +140,8 @@ export interface RadarCandidate {
   continuationReturn60m: number | null;
   continuationMfe60m: number | null;
   continuationMae60m: number | null;
+
+  securityAssessment: SecurityAssessment | null;
 
   source: RadarSource;
   visibleSource: VisibleRadarSource;
@@ -479,6 +485,8 @@ function normalizeState(state: RadarCandidateState): RadarCandidateState {
     continuationReturn60m: state.continuationReturn60m ?? null,
     continuationMfe60m: state.continuationMfe60m ?? null,
     continuationMae60m: state.continuationMae60m ?? null,
+    securityAssessment: state.securityAssessment ?? null,
+    nextSecurityCheckAt: state.nextSecurityCheckAt ?? null,
     coingeckoId: state.coingeckoId ?? null,
     coingeckoFirstSeenAt: state.coingeckoFirstSeenAt ?? null,
     coingeckoPreviouslyNotListed: state.coingeckoPreviouslyNotListed ?? false,
@@ -673,6 +681,31 @@ async function enrichCoinGecko(states: RadarCandidateState[], now: number): Prom
   });
 }
 
+async function enrichSecurity(states: RadarCandidateState[], now: number): Promise<RadarCandidateState[]> {
+  const normalized=states.map(normalizeState);
+  const due=normalized
+    .filter(s=>s.chain==="solana" && (!s.nextSecurityCheckAt || new Date(s.nextSecurityCheckAt).getTime()<=now))
+    .sort((a,b)=>Number(Boolean(b.isLive))-Number(Boolean(a.isLive)) || b.earlyMomentumScore-a.earlyMomentumScore)
+    .slice(0,MAX_SECURITY_CHECKS_PER_REFRESH);
+  const results=await Promise.all(due.map(async s=>({key:s.tokenKey, assessment:await assessSolanaTokenSecurity(s.address)})));
+  const map=new Map(results.map(x=>[x.key,x.assessment]));
+  return normalized.map(state=>{
+    const assessment=map.get(state.tokenKey) ?? state.securityAssessment ?? null;
+    if(!assessment) return state;
+    const checkedNow=map.has(state.tokenKey);
+    const next={...state,securityAssessment:assessment,nextSecurityCheckAt:checkedNow?iso(now+(assessment.critical?SECURITY_CRITICAL_RECHECK_MS:SECURITY_RECHECK_MS)):state.nextSecurityCheckAt};
+    if(assessment.critical){
+      next.isLive=false;
+      next.currentStatus="lost_momentum";
+      next.currentStatusReason=`Security Gate: ${assessment.blockers[0] ?? "risco crítico"}`;
+      next.risks=Array.from(new Set([`⛔ Security Gate: ${assessment.blockers.join(" · ")}`,...next.risks])).slice(0,7);
+    } else if(assessment.risk==="high"){
+      next.risks=Array.from(new Set([`🛡️ Security Risk HIGH (${assessment.score ?? "N/D"}/100)`,...assessment.warnings,...next.risks])).slice(0,7);
+    }
+    return next;
+  });
+}
+
 function materialize(
   stateRaw: RadarCandidateState,
   now = Date.now(),
@@ -715,6 +748,7 @@ function materialize(
     continuationReturn60m: state.continuationReturn60m ?? null,
     continuationMfe60m: state.continuationMfe60m ?? null,
     continuationMae60m: state.continuationMae60m ?? null,
+    securityAssessment: state.securityAssessment ?? null,
     boosted: state.source !== "latest_profile",
     dexUrl: `https://dexscreener.com/${state.chain}/${state.pairAddress ?? state.address}`,
     visibleSource: cgKnown ? "coingecko" : "dexscreener",
@@ -874,6 +908,8 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
         continuationReturn60m: prior?.continuationReturn60m ?? null,
         continuationMfe60m: prior?.continuationMfe60m ?? null,
         continuationMae60m: prior?.continuationMae60m ?? null,
+        securityAssessment: prior?.securityAssessment ?? null,
+        nextSecurityCheckAt: prior?.nextSecurityCheckAt ?? null,
         source: seed.source,
         boostAmount: seed.boostAmount,
         earlyMomentumScore: scored.score,
@@ -897,7 +933,8 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
       states.push(updateContinuationOutcomes(state, now));
     }
 
-    const enriched = await enrichCoinGecko(states, now);
+    const coinGeckoEnriched = await enrichCoinGecko(states, now);
+    const enriched = await enrichSecurity(coinGeckoEnriched, now);
     for (const state of enriched) await storage.setRadarCandidate(state, RADAR_TTL_SECONDS);
 
     const allStored = (await storage.listRadarCandidates()).map(normalizeState);
@@ -923,7 +960,7 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
       rejectedTokens: rejected,
       listingEffect: listingEffectStats(allStored),
       continuation: contStats,
-      note: "Descoberta primária via DexScreener; CoinGecko é verificada depois por contrato. Continuation Score é experimental e mede qualidade de continuação, não probabilidade garantida de lucro. Máximo de 4 verificações CoinGecko por ciclo para respeitar rate limits.",
+      note: "Descoberta primária via DexScreener; CoinGecko é verificada depois por contrato. Continuation Score é experimental e mede qualidade de continuação. Security Engine usa GoPlus + Solscan em Solana e um risco crítico pode bloquear o Live Radar. Máximo de 4 verificações CoinGecko e 2 security checks por ciclo para respeitar rate limits.",
     };
   } catch (err) {
     console.error("[MemeScope][Radar] refresh failed:", err instanceof Error ? err.message : String(err));
