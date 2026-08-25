@@ -3,6 +3,8 @@ import { cacheGet, cacheGetStale, cacheSet, withCoalescing } from "./cache";
 export type TrendImpact = "positive" | "negative" | "neutral";
 export type TrendCategory = "influencer" | "listing" | "regulation" | "security" | "adoption" | "market" | "other";
 
+export type TrendProvider = "gdelt" | "google_news_rss";
+
 export interface TrendArticle {
   id: string;
   title: string;
@@ -12,6 +14,7 @@ export interface TrendArticle {
   publishedAt: string | null;
   language: string | null;
   sourceCountry: string | null;
+  provider: TrendProvider;
   category: TrendCategory;
   impact: TrendImpact;
   strength: number;
@@ -21,8 +24,12 @@ export interface TrendArticle {
 export interface TrendsFeed {
   articles: TrendArticle[];
   generatedAt: string;
-  source: "gdelt";
+  source: "gdelt" | "rss" | "mixed";
   status: "live" | "stale" | "unavailable";
+  providers: {
+    gdelt: "live" | "unavailable";
+    rss: "live" | "unavailable";
+  };
   error?: string;
 }
 
@@ -152,6 +159,7 @@ function normalizeArticles(json: GdeltResponse): TrendArticle[] {
       publishedAt,
       language: asString(raw.language),
       sourceCountry: asString(raw.sourcecountry),
+      provider: "gdelt",
       ...classified,
     });
   }
@@ -161,6 +169,131 @@ function normalizeArticles(json: GdeltResponse): TrendArticle[] {
     const timeB = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
     return b.strength - a.strength || timeB - timeA;
   });
+}
+
+
+const GOOGLE_NEWS_RSS_QUERIES = [
+  "cryptocurrency when:12h",
+  "(dogecoin OR memecoin OR bitcoin OR ethereum OR solana) when:12h",
+  "(crypto Binance OR crypto Coinbase OR crypto Elon Musk) when:12h",
+] as const;
+
+function decodeXml(value: string): string {
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(Number(n)))
+    .trim();
+}
+
+function xmlTag(block: string, tag: string): string | null {
+  const match = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  return match ? decodeXml(match[1]) : null;
+}
+
+function domainFromUrl(rawUrl: string): string | null {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+function parseGoogleNewsRss(xml: string): TrendArticle[] {
+  const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) ?? [];
+  const out: TrendArticle[] = [];
+  const seen = new Set<string>();
+
+  for (const item of items) {
+    const title = xmlTag(item, "title");
+    const url = xmlTag(item, "link");
+    if (!title || !url) continue;
+
+    const publishedRaw = xmlTag(item, "pubDate");
+    const published = publishedRaw ? new Date(publishedRaw) : null;
+    const publishedAt = published && !Number.isNaN(published.getTime()) ? published.toISOString() : null;
+
+    // Google News RSS often includes <source url="...">Publication</source>.
+    const sourceMatch = item.match(/<source\b[^>]*url="([^"]+)"[^>]*>([\s\S]*?)<\/source>/i);
+    const sourceUrl = sourceMatch ? decodeXml(sourceMatch[1]) : null;
+    const sourceName = sourceMatch ? decodeXml(sourceMatch[2]) : null;
+
+    const dedupe = `${title.toLowerCase()}|${url}`;
+    if (seen.has(dedupe)) continue;
+    seen.add(dedupe);
+
+    const classified = classifyArticle(title, publishedAt);
+    out.push({
+      id: Buffer.from(`rss:${url}`).toString("base64url").slice(0, 40),
+      title,
+      url,
+      domain: sourceUrl ? domainFromUrl(sourceUrl) : sourceName,
+      imageUrl: null,
+      publishedAt,
+      language: null,
+      sourceCountry: null,
+      provider: "google_news_rss",
+      ...classified,
+    });
+  }
+
+  return out;
+}
+
+async function fetchGoogleNewsRssQuery(query: string): Promise<TrendArticle[]> {
+  const url = new URL("https://news.google.com/rss/search");
+  url.searchParams.set("q", query);
+  url.searchParams.set("hl", "en-US");
+  url.searchParams.set("gl", "US");
+  url.searchParams.set("ceid", "US:en");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6_000);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "Accept": "application/rss+xml,application/xml,text/xml;q=0.9,*/*;q=0.1",
+        "User-Agent": "Mozilla/5.0 (compatible; MemeScope/1.0; +https://vercel.app)",
+      },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`RSS_HTTP_${res.status}`);
+    const body = await res.text();
+    if (!/<rss\b|<feed\b/i.test(body)) throw new Error("RSS_INVALID_XML");
+    return parseGoogleNewsRss(body);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchRssFallback(): Promise<TrendArticle[]> {
+  const settled = await Promise.allSettled(
+    GOOGLE_NEWS_RSS_QUERIES.map((query) => fetchGoogleNewsRssQuery(query))
+  );
+
+  const merged = new Map<string, TrendArticle>();
+  let successes = 0;
+
+  for (const result of settled) {
+    if (result.status === "fulfilled") {
+      successes += 1;
+      for (const article of result.value) {
+        const key = article.title.toLowerCase();
+        const current = merged.get(key);
+        if (!current || article.strength > current.strength) merged.set(key, article);
+      }
+    } else {
+      console.warn("[MemeScope][Trends] RSS query failed:", result.reason instanceof Error ? result.reason.message : String(result.reason));
+    }
+  }
+
+  if (successes === 0) throw new Error("RSS_ALL_QUERIES_FAILED");
+  return [...merged.values()];
 }
 
 async function fetchGdeltQuery(query: string, timespan = "12h"): Promise<TrendArticle[]> {
@@ -200,62 +333,127 @@ async function fetchGdeltQuery(query: string, timespan = "12h"): Promise<TrendAr
   }
 }
 
-async function fetchGdelt(): Promise<TrendsFeed> {
-  const merged = new Map<string, TrendArticle>();
-  let successfulRequests = 0;
+async function fetchGdeltArticles(): Promise<TrendArticle[]> {
+  const settled = await Promise.allSettled(
+    SEARCH_QUERIES.map((query) => fetchGdeltQuery(query))
+  );
 
-  // Smaller independent queries are intentionally used instead of one large
-  // boolean expression. If one GDELT query is throttled/rejected, the radar
-  // can still return articles from the others.
-  for (const query of SEARCH_QUERIES) {
-    try {
-      const articles = await fetchGdeltQuery(query);
-      successfulRequests += 1;
-      for (const article of articles) {
+  const merged = new Map<string, TrendArticle>();
+  let successes = 0;
+
+  for (const result of settled) {
+    if (result.status === "fulfilled") {
+      successes += 1;
+      for (const article of result.value) {
         const key = `${article.title.toLowerCase()}|${article.url}`;
         const current = merged.get(key);
         if (!current || article.strength > current.strength) merged.set(key, article);
       }
-    } catch {
-      // Continue with the next query. getTrendsFeed handles total failure.
+    } else {
+      console.warn("[MemeScope][Trends] GDELT query failed:", result.reason instanceof Error ? result.reason.message : String(result.reason));
     }
   }
 
-  if (successfulRequests === 0) throw new Error("GDELT_ALL_QUERIES_FAILED");
+  if (successes === 0) throw new Error("GDELT_ALL_QUERIES_FAILED");
+  return [...merged.values()];
+}
 
-  const articles = [...merged.values()]
+function mergeProviderArticles(groups: TrendArticle[][]): TrendArticle[] {
+  const merged = new Map<string, TrendArticle>();
+
+  for (const group of groups) {
+    for (const article of group) {
+      // Dedupe mainly by normalized title because GDELT and Google News may
+      // point to different wrapper URLs for the same story.
+      const key = article.title.toLowerCase().replace(/\s+/g, " ").trim();
+      const current = merged.get(key);
+      if (!current || article.strength > current.strength) merged.set(key, article);
+    }
+  }
+
+  return [...merged.values()]
     .sort((a, b) => {
       const timeA = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
       const timeB = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
       return b.strength - a.strength || timeB - timeA;
     })
     .slice(0, 100);
+}
+
+async function fetchLiveTrends(): Promise<TrendsFeed> {
+  // Both providers start together. GDELT can be slow from some Vercel regions,
+  // so an RSS provider can still return a useful feed without waiting 30s.
+  const [gdeltResult, rssResult] = await Promise.allSettled([
+    fetchGdeltArticles(),
+    fetchRssFallback(),
+  ]);
+
+  const gdeltArticles = gdeltResult.status === "fulfilled" ? gdeltResult.value : [];
+  const rssArticles = rssResult.status === "fulfilled" ? rssResult.value : [];
+
+  if (gdeltResult.status === "rejected") {
+    console.warn("[MemeScope][Trends] GDELT unavailable:", gdeltResult.reason instanceof Error ? gdeltResult.reason.message : String(gdeltResult.reason));
+  }
+  if (rssResult.status === "rejected") {
+    console.warn("[MemeScope][Trends] RSS unavailable:", rssResult.reason instanceof Error ? rssResult.reason.message : String(rssResult.reason));
+  }
+
+  if (gdeltArticles.length === 0 && rssArticles.length === 0) {
+    throw new Error("ALL_TREND_PROVIDERS_FAILED");
+  }
+
+  const articles = mergeProviderArticles([gdeltArticles, rssArticles]);
+  const gdeltLive = gdeltArticles.length > 0;
+  const rssLive = rssArticles.length > 0;
 
   return {
     articles,
     generatedAt: new Date().toISOString(),
-    source: "gdelt",
+    source: gdeltLive && rssLive ? "mixed" : gdeltLive ? "gdelt" : "rss",
     status: "live",
+    providers: {
+      gdelt: gdeltLive ? "live" : "unavailable",
+      rss: rssLive ? "live" : "unavailable",
+    },
   };
 }
 
 export async function getTrendsFeed(): Promise<TrendsFeed> {
   const cached = cacheGet<TrendsFeed>(CACHE_KEY);
-  if (cached) return cached.value;
+  if (cached && cached.value.status === "live" && cached.value.articles.length > 0) {
+    return cached.value;
+  }
 
   try {
-    const feed = await withCoalescing(CACHE_KEY, fetchGdelt);
-    cacheSet(CACHE_KEY, feed, CACHE_TTL_MS);
+    const feed = await withCoalescing(CACHE_KEY, fetchLiveTrends);
+    // Never cache unavailable/empty failures as a successful fresh result.
+    if (feed.status === "live" && feed.articles.length > 0) {
+      cacheSet(CACHE_KEY, feed, CACHE_TTL_MS);
+    }
     return feed;
-  } catch {
+  } catch (error) {
+    console.error(
+      "[MemeScope][Trends] All providers unavailable:",
+      error instanceof Error ? error.message : String(error)
+    );
+
     const stale = cacheGetStale<TrendsFeed>(CACHE_KEY);
-    if (stale) return { ...stale.value, status: "stale", generatedAt: new Date().toISOString() };
+    if (stale && stale.value.articles.length > 0) {
+      return {
+        ...stale.value,
+        status: "stale",
+        generatedAt: new Date().toISOString(),
+        error: "As fontes ao vivo falharam; a mostrar o último feed válido em cache.",
+      };
+    }
+
     return {
       articles: [],
       generatedAt: new Date().toISOString(),
-      source: "gdelt",
+      source: "mixed",
       status: "unavailable",
-      error: "Não foi possível obter notícias recentes da GDELT neste momento.",
+      providers: { gdelt: "unavailable", rss: "unavailable" },
+      error: "Não foi possível obter notícias recentes neste momento.",
     };
   }
 }

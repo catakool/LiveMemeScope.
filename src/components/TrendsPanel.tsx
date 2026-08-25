@@ -176,7 +176,9 @@ export default function TrendsPanel({ records, onOpen }: { records: DiscoveryRec
             <span className={`rounded-full border px-2 py-1 ${feed?.status === "live" ? "border-[var(--accent-opportunity)]/40 text-[var(--accent-opportunity)]" : "border-[var(--accent-gold)]/40 text-[var(--accent-gold)]"}`}>
               {feed?.status === "live" ? "● Notícias LIVE" : feed?.status === "stale" ? "◐ Cache recente" : "○ Fonte indisponível"}
             </span>
-            <span className="rounded-full border border-[var(--border)] px-2 py-1 text-[var(--text-muted)]">GDELT · 12h</span>
+            <span className="rounded-full border border-[var(--border)] px-2 py-1 text-[var(--text-muted)]">
+              {feed?.source === "mixed" ? "GDELT + RSS · 12h" : feed?.source === "rss" ? "RSS fallback · 12h" : "GDELT · 12h"}
+            </span>
           </div>
         </div>
       </div>
@@ -237,7 +239,7 @@ export default function TrendsPanel({ records, onOpen }: { records: DiscoveryRec
       )}
 
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 text-[11px] text-[var(--text-faint)]">
-        <strong className="text-[var(--text-muted)]">Como interpretar:</strong> “força” mede relevância heurística + recência do catalisador, não probabilidade de lucro nem sentimento financeiro garantido. A v1 usa notícias da GDELT; X/Twitter e Reddit continuam fora até existir uma fonte oficial configurada.
+        <strong className="text-[var(--text-muted)]">Como interpretar:</strong> “força” mede relevância heurística + recência do catalisador, não probabilidade de lucro nem sentimento financeiro garantido. O radar usa GDELT e um RSS de notícias como fallback; X/Twitter e Reddit continuam fora até existir uma fonte oficial configurada.
       </div>
     </section>
   );

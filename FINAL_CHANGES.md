@@ -1,3 +1,13 @@
+# MemeScope v10 — Tendências resilientes
+
+- GDELT: as 3 pesquisas passam a correr em paralelo, evitando o padrão 10s + 10s + 10s observado nos logs da Vercel.
+- Fallback: Google News RSS é consultado em paralelo e mantém Tendências útil quando GDELT está indisponível.
+- Cache: resultados indisponíveis/vazios nunca são guardados como um feed fresco válido.
+- Stale fallback: se todas as fontes falharem, o último feed válido pode ser mostrado como cache recente.
+- Observabilidade: falhas de GDELT/RSS aparecem nos Runtime Logs da Vercel com mensagens explícitas.
+- UI: mostra `GDELT + RSS`, `RSS fallback` ou `GDELT` conforme a fonte efetivamente usada.
+- Mantidas as correções de identidade/token da v9 fixed e todo o Opportunity Engine/Redis/Cron existente.
+
 # MemeScope v9 fixed — production fixes
 
 - Tendências: GDELT now uses multiple smaller queries with partial-failure tolerance instead of one all-or-nothing query.
