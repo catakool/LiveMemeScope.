@@ -1,3 +1,27 @@
+# MemeScope v13 — Radar Memory
+
+## New Token Radar
+- `Live Radar` now contains only tokens that pass all Radar gates in the current refresh.
+- Tokens no longer disappear when they stop qualifying. They move to `Detetados recentemente` for 48 hours.
+- Recently detected tokens are explicitly marked `Lost Momentum` or `Stale`; they are never presented as an active Breakout/Explosive signal.
+- Radar persistence now tracks:
+  - first detected timestamp;
+  - first detected price;
+  - first detected Early Momentum score;
+  - last seen timestamp;
+  - last time the token qualified for Live Radar;
+  - current price;
+  - peak price since detection;
+  - current return since detection;
+  - peak return since detection;
+  - current Radar status and reason for losing qualification.
+- Existing Redis TTL remains 8 days, so the historical state survives browser refreshes and serverless invocations.
+- CoinGecko verification / Pre-CoinGecko tracking / listing-effect metrics remain intact.
+
+## Validation
+- Syntax/transpile validation passed for all 59 TypeScript/TSX files.
+- A complete `npm ci` could not finish within the execution window, so Vercel remains the final full dependency/type/build check.
+
 # MemeScope v12 — Dual Source + Pre-CoinGecko tracking
 
 - New Token Radar mantiene DexScreener como fuente primaria de descubrimiento temprano.

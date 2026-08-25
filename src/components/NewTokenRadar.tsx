@@ -54,17 +54,24 @@ function Card({ c }: { c: RadarCandidate }) {
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-display font-semibold truncate">{c.name}</h3>
             <span className="font-data text-xs text-[var(--text-muted)]">${c.symbol}</span>
-            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${m.cls}`}>{m.icon} {m.label}</span>
+            {c.currentStatus === "live" ? (
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${m.cls}`}>{m.icon} {m.label}</span>
+            ) : c.currentStatus === "stale" ? (
+              <span className="rounded-full border border-[var(--text-faint)]/50 px-2 py-0.5 text-[10px] font-semibold text-[var(--text-muted)]">⏸ Stale</span>
+            ) : (
+              <span className="rounded-full border border-[var(--text-faint)]/50 px-2 py-0.5 text-[10px] font-semibold text-[var(--text-muted)]">↘ Lost Momentum</span>
+            )}
             <SourceBadge c={c} />
             {c.isPreCoinGecko && <span className="rounded-full border border-[var(--accent-gold)]/45 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-gold)]">Pre-CoinGecko watch</span>}
           </div>
           <div className="mt-1 text-[10px] text-[var(--text-faint)]">
             {CHAIN_LABEL[c.chain]} · par criado há {ageLabel(c.ageMinutes)} · MemeScope detetou há {ageLabel(c.detectedMinutesAgo)}
+            {c.currentStatus !== "live" && <> · último dado {dateTime(c.lastSeenAt)}</>}
           </div>
         </div>
         <div className="text-right shrink-0">
           <div className="font-data text-xl font-bold">{c.earlyMomentumScore.toFixed(0)}</div>
-          <div className="text-[9px] uppercase tracking-wider text-[var(--text-faint)]">Early Momentum</div>
+          <div className="text-[9px] uppercase tracking-wider text-[var(--text-faint)]">{c.currentStatus === "live" ? "Early Momentum" : "Score atual"}</div>
         </div>
       </div>
 
@@ -79,8 +86,17 @@ function Card({ c }: { c: RadarCandidate }) {
         <span>Buys/Sells 5m: <b className="font-data text-[var(--text)]">{c.buysM5 ?? "N/D"}/{c.sellsM5 ?? "N/D"}</b></span>
         {buyRatio !== null && <span>Compras: <b className="font-data text-[var(--text)]">{(buyRatio * 100).toFixed(0)}%</b></span>}
         <span>Desde deteção: <b className={`font-data ${changeCls(c.returnSinceDetected)}`}>{formatPercent(c.returnSinceDetected)}</b></span>
+        <span>Pico desde deteção: <b className={`font-data ${changeCls(c.peakReturnSinceDetected)}`}>{formatPercent(c.peakReturnSinceDetected)}</b></span>
         <span>Origem: <b className="text-[var(--text)]">DexScreener</b></span>
       </div>
+
+      {c.currentStatus !== "live" && (
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-2 text-[10px] text-[var(--text-muted)]">
+          <b className="text-[var(--text)]">Estado atual:</b> {c.currentStatus === "stale" ? "dados desatualizados" : "já não passa os filtros do Live Radar"}
+          {c.currentStatusReason ? ` · ${c.currentStatusReason}` : ""}
+          {c.lastQualifiedAt && <div className="mt-0.5">Última vez qualificado: {dateTime(c.lastQualifiedAt)}</div>}
+        </div>
+      )}
 
       {c.visibleSource === "coingecko" && (
         <div className="rounded-lg border border-[var(--accent-opportunity)]/25 bg-[var(--accent-opportunity-dim)]/25 p-2 text-[10px] text-[var(--text-muted)]">
@@ -143,6 +159,11 @@ export default function NewTokenRadar() {
     return list;
   }, [feed, filter, sourceFilter, sort]);
 
+  const recentCandidates = useMemo(() => {
+    return [...(feed?.recentCandidates ?? [])]
+      .sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime());
+  }, [feed]);
+
   const count = (c: RadarClassification) => feed?.candidates.filter((x) => x.classification === c).length ?? 0;
   const sourceCount = (source: VisibleRadarSource) => feed?.candidates.filter((x) => x.visibleSource === source).length ?? 0;
   const preCgCount = feed?.candidates.filter((x) => x.isPreCoinGecko).length ?? 0;
@@ -152,7 +173,7 @@ export default function NewTokenRadar() {
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2"><span className="text-xl">🚀</span><h2 className="font-display text-lg font-semibold">New Token Radar</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] ${feed?.status === "live" ? "border-[var(--accent-opportunity)]/40 text-[var(--accent-opportunity)]" : "border-[var(--accent-risk)]/40 text-[var(--accent-risk)]"}`}>{feed?.status === "live" ? "LIVE" : "INDISPONÍVEL"}</span></div>
-          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">DexScreener faz a descoberta precoce. Depois a MemeScope verifica o contrato na CoinGecko. Se o token existir nas duas fontes, <b>CoinGecko tem prioridade no campo Source</b>, mas a origem DexScreener e a primeira deteção ficam guardadas.</p>
+          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> mostra apenas tokens que passam os gates agora. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato.</p>
         </div>
         <div className="grid grid-cols-4 gap-2 text-center shrink-0">
           <div className="rounded-lg bg-[var(--surface-2)] px-3 py-2"><div className="font-data font-bold text-[var(--accent-risk)]">{count("explosive")}</div><div className="text-[9px] text-[var(--text-faint)]">EXPLOSIVE</div></div>
@@ -172,6 +193,14 @@ export default function NewTokenRadar() {
       <div className="text-[9px] text-[var(--text-faint)]">Estas métricas começam em N/D e tornam-se úteis apenas depois de acumular uma amostra real. Não tratamos “entrar na CoinGecko” como garantia de subida.</div>
     </div>}
 
+    <div className="flex items-center justify-between gap-2">
+      <div>
+        <h3 className="font-display text-sm font-semibold">🔥 Live Radar</h3>
+        <p className="text-[10px] text-[var(--text-faint)]">Passam os filtros neste momento. Estes são os candidatos ativos, não o histórico.</p>
+      </div>
+      <span className="font-data text-xs text-[var(--text-muted)]">{feed?.candidates.length ?? 0} live</span>
+    </div>
+
     <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 flex flex-wrap gap-2 text-xs">
       <button onClick={() => setSourceFilter("all")} className={`rounded-lg border px-3 py-1.5 ${sourceFilter === "all" ? "border-[var(--accent-info)] text-[var(--accent-info)]" : "border-[var(--border)] text-[var(--text-muted)]"}`}>Todas as fontes</button>
       <button onClick={() => setSourceFilter("dexscreener")} className={`rounded-lg border px-3 py-1.5 ${sourceFilter === "dexscreener" ? "border-[var(--accent-info)] text-[var(--accent-info)]" : "border-[var(--border)] text-[var(--text-muted)]"}`}>Source: DexScreener ({sourceCount("dexscreener")})</button>
@@ -188,6 +217,21 @@ export default function NewTokenRadar() {
     {!loading && feed?.error && !feed.candidates.length && <div className="rounded-xl border border-[var(--accent-risk)]/30 bg-[var(--surface)] p-4 text-sm text-[var(--accent-risk)]">O feed de novos tokens está temporariamente indisponível.</div>}
     {!loading && feed && !candidates.length && <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 text-sm text-[var(--text-muted)]"><div className="font-semibold text-[var(--text)]">Nenhum candidato passou estes filtros neste momento.</div><p className="mt-1 text-xs">O radar prefere mostrar zero tokens a promover pools sem liquidez, volume ou atividade suficientes.</p></div>}
     {!!candidates.length && <div className="grid lg:grid-cols-2 gap-4">{candidates.map((c) => <Card key={c.tokenKey} c={c} />)}</div>}
+
+    {feed && <div className="border-t border-[var(--border)] pt-5 space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h3 className="font-display text-sm font-semibold">🕘 Detetados recentemente</h3>
+          <p className="text-[10px] text-[var(--text-faint)]">Tokens vistos nas últimas 48h que já não estão no Live Radar. Permanecem aqui para medir o que aconteceu depois da deteção.</p>
+        </div>
+        <span className="font-data text-xs text-[var(--text-muted)]">{recentCandidates.length} guardados</span>
+      </div>
+      {!recentCandidates.length ? (
+        <div className="rounded-xl border border-dashed border-[var(--border)] bg-[var(--surface)] p-4 text-xs text-[var(--text-muted)]">Ainda não há candidatos que tenham saído do Live Radar nesta janela.</div>
+      ) : (
+        <div className="grid lg:grid-cols-2 gap-4">{recentCandidates.map((c) => <Card key={`recent-${c.tokenKey}`} c={c} />)}</div>
+      )}
+    </div>}
 
     {feed && <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-[10px] text-[var(--text-faint)]">Analisados nesta atualização: {feed.scannedTokens} · rejeitados pelos filtros: {feed.rejectedTokens}. {feed.note} “Source: CoinGecko” significa que o contrato foi confirmado na CoinGecko; não significa que a CoinGecko seja a origem da descoberta. “Primeira confirmação” é a data observada pela MemeScope, não uma data oficial de listing. *FDV é mostrado quando market cap não está disponível.</div>}
   </section>;

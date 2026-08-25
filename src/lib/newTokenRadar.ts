@@ -7,6 +7,8 @@ const BASE = "https://api.dexscreener.com";
 const CACHE_KEY = "new-token-radar:v2";
 const CACHE_TTL_MS = 45_000;
 const RADAR_TTL_SECONDS = 8 * 24 * 60 * 60;
+const RECENT_DETECTION_WINDOW_MS = 48 * 60 * 60_000;
+const RADAR_STALE_AFTER_MS = 15 * 60_000;
 const MAX_PAIR_AGE_MINUTES = 7 * 24 * 60;
 const MAX_COINGECKO_CHECKS_PER_REFRESH = 4;
 const COINGECKO_RECHECK_MS = 15 * 60_000;
@@ -73,8 +75,16 @@ export interface RadarCandidate {
   firstDetectedAt: string;
   detectedMinutesAgo: number;
   firstDetectedPrice: number | null;
+  firstDetectedScore: number | null;
   price: number | null;
   returnSinceDetected: number | null;
+  peakPriceSinceDetected: number | null;
+  peakReturnSinceDetected: number | null;
+  lastSeenAt: string;
+  lastQualifiedAt: string | null;
+  isLive: boolean;
+  currentStatus: "live" | "lost_momentum" | "stale";
+  currentStatusReason: string | null;
   liquidityUsd: number | null;
   marketCapOrFdv: number | null;
   marketCapIsFdv: boolean;
@@ -107,7 +117,10 @@ export interface RadarCandidate {
 }
 
 export interface RadarFeed {
+  /** Só candidatos que passam os gates AGORA. */
   candidates: RadarCandidate[];
+  /** Deteções recentes que já não passam os gates, preservadas para acompanhamento. */
+  recentCandidates: RadarCandidate[];
   generatedAt: string;
   source: "dexscreener+coingecko";
   status: "live" | "unavailable";
@@ -297,6 +310,13 @@ function normalizeState(state: RadarCandidateState): RadarCandidateState {
     ...state,
     volumeH24: state.volumeH24 ?? null,
     buysH1: state.buysH1 ?? null,
+    firstDetectedScore: state.firstDetectedScore ?? state.earlyMomentumScore ?? null,
+    lastQualifiedAt: state.lastQualifiedAt ?? state.firstDetectedAt,
+    peakPriceSinceDetected: state.peakPriceSinceDetected ?? state.price ?? state.firstDetectedPrice ?? null,
+    peakReturnSinceDetected: state.peakReturnSinceDetected ?? returnFrom(state.firstDetectedPrice, state.peakPriceSinceDetected ?? state.price ?? null),
+    isLive: state.isLive ?? true,
+    currentStatus: state.currentStatus ?? "live",
+    currentStatusReason: state.currentStatusReason ?? null,
     sellsH1: state.sellsH1 ?? null,
     coingeckoId: state.coingeckoId ?? null,
     coingeckoFirstSeenAt: state.coingeckoFirstSeenAt ?? null,
@@ -383,11 +403,21 @@ function materialize(stateRaw: RadarCandidateState, now = Date.now()): RadarCand
   const state = normalizeState(stateRaw);
   const cgKnown = Boolean(state.coingeckoId);
   const cgCheckedNotListed = state.coingeckoPreviouslyNotListed && !cgKnown;
+  const lastSeenMs = new Date(state.lastSeenAt).getTime();
+  const stale = !Number.isFinite(lastSeenMs) || now - lastSeenMs > RADAR_STALE_AFTER_MS;
+  const currentStatus: "live" | "lost_momentum" | "stale" = stale ? "stale" : state.isLive ? "live" : "lost_momentum";
   return {
     ...state,
     ageMinutes: Math.max(0, (now - new Date(state.pairCreatedAt).getTime()) / 60_000),
     detectedMinutesAgo: Math.max(0, (now - new Date(state.firstDetectedAt).getTime()) / 60_000),
+    firstDetectedScore: state.firstDetectedScore ?? null,
     returnSinceDetected: returnFrom(state.firstDetectedPrice, state.price),
+    peakPriceSinceDetected: state.peakPriceSinceDetected ?? null,
+    peakReturnSinceDetected: state.peakReturnSinceDetected ?? returnFrom(state.firstDetectedPrice, state.peakPriceSinceDetected ?? null),
+    lastQualifiedAt: state.lastQualifiedAt ?? null,
+    isLive: currentStatus === "live",
+    currentStatus,
+    currentStatusReason: stale ? "Dados do Radar desatualizados" : state.currentStatusReason ?? null,
     boosted: state.source !== "latest_profile",
     dexUrl: `https://dexscreener.com/${state.chain}/${state.pairAddress ?? state.address}`,
     visibleSource: cgKnown ? "coingecko" : "dexscreener",
@@ -456,16 +486,29 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
 
     for (const [key, seed] of scanSeeds) {
       const pair = pairs.get(key);
+      const prior = existingByKey.get(key);
       if (!pair?.pairCreatedAt) { rejected++; continue; }
+
       const scored = scorePair(pair, seed.source);
-      if (!scored.classification) { rejected++; continue; }
+      const qualifiesNow = Boolean(scored.classification);
+      if (!qualifiesNow && !prior) { rejected++; continue; }
+      if (!qualifiesNow) rejected++;
 
       const price = pair.priceUsd ? Number(pair.priceUsd) : null;
-      const prior = existingByKey.get(key);
       const firstDetectedAt = prior?.firstDetectedAt ?? iso(now);
       const firstDetectedPrice = prior?.firstDetectedPrice ?? price;
+      const firstDetectedScore = prior?.firstDetectedScore ?? (qualifiesNow ? scored.score : null);
       const marketCap = num(pair.marketCap);
       const fdv = num(pair.fdv);
+      const priorPeak = prior?.peakPriceSinceDetected ?? prior?.price ?? prior?.firstDetectedPrice ?? null;
+      const peakPrice = price !== null && (priorPeak === null || price > priorPeak) ? price : priorPeak;
+      const peakReturn = returnFrom(firstDetectedPrice, peakPrice);
+      const classification = scored.classification ?? prior?.classification;
+      if (!classification) continue;
+
+      const rejectionReason = !qualifiesNow
+        ? (scored.risks[0] ?? "Já não passa os gates atuais de momentum/atividade")
+        : null;
 
       const state = normalizeState({
         tokenKey: key,
@@ -478,8 +521,12 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
         pairCreatedAt: new Date(pair.pairCreatedAt).toISOString(),
         firstDetectedAt,
         firstDetectedPrice,
+        firstDetectedScore,
         lastSeenAt: iso(now),
+        lastQualifiedAt: qualifiesNow ? iso(now) : prior?.lastQualifiedAt ?? prior?.firstDetectedAt ?? null,
         price,
+        peakPriceSinceDetected: peakPrice,
+        peakReturnSinceDetected: peakReturn,
         liquidityUsd: num(pair.liquidity?.usd),
         marketCapOrFdv: marketCap ?? fdv,
         marketCapIsFdv: marketCap === null && fdv !== null,
@@ -495,9 +542,12 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
         source: seed.source,
         boostAmount: seed.boostAmount,
         earlyMomentumScore: scored.score,
-        classification: scored.classification,
-        reasons: scored.reasons,
-        risks: scored.risks,
+        classification,
+        isLive: qualifiesNow,
+        currentStatus: qualifiesNow ? "live" : "lost_momentum",
+        currentStatusReason: rejectionReason,
+        reasons: qualifiesNow ? scored.reasons : prior?.reasons ?? scored.reasons,
+        risks: qualifiesNow ? scored.risks : Array.from(new Set([...(prior?.risks ?? []), ...scored.risks])).slice(0, 5),
         coingeckoId: prior?.coingeckoId ?? null,
         coingeckoFirstSeenAt: prior?.coingeckoFirstSeenAt ?? null,
         coingeckoPreviouslyNotListed: prior?.coingeckoPreviouslyNotListed ?? false,
@@ -515,13 +565,21 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
     const enriched = await enrichCoinGecko(states, now);
     for (const state of enriched) await storage.setRadarCandidate(state, RADAR_TTL_SECONDS);
 
-    const allStored = await storage.listRadarCandidates();
-    const candidates = enriched
-      .map((state) => materialize(state, now))
+    const allStored = (await storage.listRadarCandidates()).map(normalizeState);
+    const materializedAll = allStored.map((state) => materialize(state, now));
+    const candidates = materializedAll
+      .filter((candidate) => candidate.currentStatus === "live")
       .sort((a, b) => b.earlyMomentumScore - a.earlyMomentumScore || a.ageMinutes - b.ageMinutes);
+    const liveKeys = new Set(candidates.map((candidate) => candidate.tokenKey));
+    const recentCandidates = materializedAll
+      .filter((candidate) => !liveKeys.has(candidate.tokenKey))
+      .filter((candidate) => now - new Date(candidate.firstDetectedAt).getTime() <= RECENT_DETECTION_WINDOW_MS)
+      .sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime())
+      .slice(0, 30);
 
     return {
       candidates,
+      recentCandidates,
       generatedAt: iso(now),
       source: "dexscreener+coingecko",
       status: "live",
@@ -533,9 +591,12 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
   } catch (err) {
     console.error("[MemeScope][Radar] refresh failed:", err instanceof Error ? err.message : String(err));
     const previousStates = await storage.listRadarCandidates();
-    const previous = previousStates.map((s) => materialize(s)).sort((a, b) => b.earlyMomentumScore - a.earlyMomentumScore);
+    const materializedPrevious = previousStates.map((s) => materialize(s));
+    const previous = materializedPrevious.filter((c) => c.currentStatus === "live").sort((a, b) => b.earlyMomentumScore - a.earlyMomentumScore);
+    const recentCandidates = materializedPrevious.filter((c) => c.currentStatus !== "live").slice(0, 30);
     return {
       candidates: previous,
+      recentCandidates,
       generatedAt: new Date().toISOString(),
       source: "dexscreener+coingecko",
       status: previous.length ? "live" : "unavailable",
@@ -552,6 +613,6 @@ export async function getNewTokenRadarFeed(): Promise<RadarFeed> {
   const cached = cacheGet<RadarFeed>(CACHE_KEY);
   if (cached) return cached.value;
   const feed = await withCoalescing(CACHE_KEY, refreshNewTokenRadar);
-  if (feed.candidates.length) cacheSet(CACHE_KEY, feed, CACHE_TTL_MS);
+  if (feed.candidates.length || feed.recentCandidates.length) cacheSet(CACHE_KEY, feed, CACHE_TTL_MS);
   return feed;
 }

@@ -130,8 +130,12 @@ export interface RadarCandidateState {
   pairCreatedAt: string;
   firstDetectedAt: string;
   firstDetectedPrice: number | null;
+  firstDetectedScore?: number | null;
   lastSeenAt: string;
+  lastQualifiedAt?: string | null;
   price: number | null;
+  peakPriceSinceDetected?: number | null;
+  peakReturnSinceDetected?: number | null;
   liquidityUsd: number | null;
   marketCapOrFdv: number | null;
   marketCapIsFdv: boolean;
@@ -149,7 +153,12 @@ export interface RadarCandidateState {
   source: "latest_profile" | "boosted" | "both";
   boostAmount: number | null;
   earlyMomentumScore: number;
+  /** Última classificação que passou os gates do Radar. */
   classification: "explosive" | "breakout" | "emerging" | "mature";
+  /** true apenas quando passa os gates na atualização atual. */
+  isLive?: boolean;
+  currentStatus?: "live" | "lost_momentum" | "stale";
+  currentStatusReason?: string | null;
   reasons: string[];
   risks: string[];
 
