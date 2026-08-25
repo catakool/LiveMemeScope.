@@ -30,3 +30,16 @@ npm test
 npm run lint
 npm run build
 ```
+
+## v9 — Aba Tendências / Catalyst Radar
+
+- Nova aba interna **Tendências**, separada da dashboard principal.
+- Novo endpoint server-side `GET /api/trends` com cache de 5 minutos.
+- Integração de notícias recentes via **GDELT DOC 2.0** (janela de 12h, sem API key).
+- Classificação heurística e transparente de catalisadores: influencer (inclui menções de Elon Musk), listing/exchange, adoção, regulação, segurança/risco e movimentos fortes de mercado.
+- `strength` mede recência + sinais explícitos no título; **não é probabilidade de lucro**.
+- Filtros de notícias: Todas / Positivas / Risco / Neutras.
+- Liga automaticamente notícias a tokens já presentes no MemeScope por nome/símbolo, quando o match é suficientemente claro.
+- Secção “Em tendência no mercado” reaproveita o CoinGecko Trending já existente no Discovery Engine.
+- A v9 **não injeta notícias diretamente no Opportunity Score**: primeiro recolhemos/observamos os catalisadores e evitamos que uma notícia negativa ou uma menção isolada crie artificialmente um sinal de compra.
+- X/Twitter e Reddit permanecem preparados para uma iteração posterior com fontes oficiais.

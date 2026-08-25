@@ -16,8 +16,10 @@ import AlertsPanel from "@/components/AlertsPanel";
 import AddTokenPanel from "@/components/AddTokenPanel";
 import CoinDetailModal from "@/components/CoinDetailModal";
 import LiveOpportunities from "@/components/LiveOpportunities";
+import TrendsPanel from "@/components/TrendsPanel";
 
 type ViewMode = "cards" | "table";
+type MainTab = "dashboard" | "trends";
 
 export default function Home() {
   const { data, error, loading } = useCoins();
@@ -25,6 +27,7 @@ export default function Home() {
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [view, setView] = useState<ViewMode>("cards");
   const [openCoin, setOpenCoin] = useState<string | null>(null);
+  const [mainTab, setMainTab] = useState<MainTab>("dashboard");
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hidratação intencional de localStorage após o mount (não existe no servidor)
@@ -59,7 +62,24 @@ export default function Home() {
       <TickerTape records={records} />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
-        <Disclaimer />
+        <div className="flex items-center gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1 w-fit">
+          <button
+            onClick={() => setMainTab("dashboard")}
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${mainTab === "dashboard" ? "bg-[var(--surface-2)] text-[var(--text)]" : "text-[var(--text-muted)] hover:text-[var(--text)]"}`}
+          >
+            Dashboard
+          </button>
+          <button
+            onClick={() => setMainTab("trends")}
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${mainTab === "trends" ? "bg-[var(--surface-2)] text-[var(--accent-info)]" : "text-[var(--text-muted)] hover:text-[var(--text)]"}`}
+          >
+            Tendências
+          </button>
+        </div>
+
+        {mainTab === "dashboard" ? (
+          <>
+            <Disclaimer />
 
         {error && (
           <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk-dim)] text-[var(--accent-risk)] text-sm px-4 py-2.5">
@@ -143,6 +163,10 @@ export default function Home() {
               <AddTokenPanel />
             </div>
           </>
+        )}
+          </>
+        ) : (
+          <TrendsPanel records={records} onOpen={setOpenCoin} />
         )}
       </main>
 

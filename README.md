@@ -568,3 +568,12 @@ Correr com `npm test`.
 - **Não se afirma que o algoritmo é lucrativo.** A infraestrutura de
   backtesting existe precisamente para poder verificar isso mais tarde, com
   dados reais acumulados ao longo do tempo — não há essa validação ainda.
+
+## 12. Tendências e catalisadores (v9)
+
+A interface inclui agora uma aba **Tendências** separada da dashboard. Ela combina dois tipos de sinal:
+
+1. **Tendência de mercado** — tokens do Discovery Feed que aparecem no CoinGecko Trending.
+2. **Catalisadores de notícias** — `GET /api/trends` consulta a GDELT DOC 2.0 (janela recente de 12 horas), classifica títulos por categorias como influencer, listing, adoção, regulação e segurança e apresenta uma força heurística baseada em recência/relevância.
+
+A força de um catalisador **não é uma probabilidade de subida**. Nesta versão as notícias ainda não alteram diretamente o Opportunity Score: servem como camada explicativa/observacional. Isto evita que uma menção isolada, uma notícia negativa ou um título ambíguo gere automaticamente uma recomendação de entrada. X/Twitter e Reddit não são usados nesta versão.
