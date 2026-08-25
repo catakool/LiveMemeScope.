@@ -1,3 +1,15 @@
+# MemeScope v15 — Momentum Continuation
+
+- `Continuation Score` separado do `Early Momentum Score`.
+- Usa Early Momentum, Activity Quality, buys/sells, aceleração de volume, liquidez e penalização por movimento já demasiado esticado.
+- Não é apresentado como probabilidade de lucro.
+- Backtest automático desde a primeira deteção: +1m, +3m, +5m, +10m, +15m, +30m e +60m.
+- Cada horizonte exige observação suficientemente próxima; caso contrário fica N/D.
+- MFE/MAE observados durante a primeira hora.
+- Painel agregado com mediana, percentagem positiva e tamanho da amostra.
+- O backtest de +5m só influencia o Continuation Score depois de n≥20.
+- Com Cron ~2m, +1m terá frequentemente menos amostra de propósito.
+
 # MemeScope v14 — Transaction Quality / Anti-Inflation
 
 ## New Token Radar

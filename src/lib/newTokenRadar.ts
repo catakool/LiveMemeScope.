@@ -4,7 +4,7 @@ import { Chain } from "./types";
 import { getStorage, RadarCandidateState } from "./storage";
 
 const BASE = "https://api.dexscreener.com";
-const CACHE_KEY = "new-token-radar:v3";
+const CACHE_KEY = "new-token-radar:v4";
 const CACHE_TTL_MS = 45_000;
 const RADAR_TTL_SECONDS = 8 * 24 * 60 * 60;
 const RECENT_DETECTION_WINDOW_MS = 48 * 60 * 60_000;
@@ -62,6 +62,24 @@ export interface CoinGeckoListingEffectStats {
   return24h: CoinGeckoHorizonStats;
 }
 
+export interface ContinuationHorizonStats {
+  sampleSize: number;
+  medianReturn: number | null;
+  positiveRate: number | null;
+}
+
+export interface ContinuationStats {
+  observedDetections: number;
+  note: string;
+  return1m: ContinuationHorizonStats;
+  return3m: ContinuationHorizonStats;
+  return5m: ContinuationHorizonStats;
+  return10m: ContinuationHorizonStats;
+  return15m: ContinuationHorizonStats;
+  return30m: ContinuationHorizonStats;
+  return60m: ContinuationHorizonStats;
+}
+
 export interface RadarCandidate {
   tokenKey: string;
   chain: Chain;
@@ -106,6 +124,19 @@ export interface RadarCandidate {
   rawEarlyMomentumScore: number | null;
   transactionQualityDetail: string | null;
 
+  continuationScore: number;
+  continuationConfidence: "low" | "medium" | "high";
+  continuationReasons: string[];
+  continuationReturn1m: number | null;
+  continuationReturn3m: number | null;
+  continuationReturn5m: number | null;
+  continuationReturn10m: number | null;
+  continuationReturn15m: number | null;
+  continuationReturn30m: number | null;
+  continuationReturn60m: number | null;
+  continuationMfe60m: number | null;
+  continuationMae60m: number | null;
+
   source: RadarSource;
   visibleSource: VisibleRadarSource;
   originSource: "dexscreener";
@@ -136,6 +167,7 @@ export interface RadarFeed {
   scannedTokens: number;
   rejectedTokens: number;
   listingEffect: CoinGeckoListingEffectStats;
+  continuation: ContinuationStats;
   note: string;
   error?: string;
 }
@@ -431,6 +463,22 @@ function normalizeState(state: RadarCandidateState): RadarCandidateState {
     activityPenalty: state.activityPenalty ?? 0,
     rawEarlyMomentumScore: state.rawEarlyMomentumScore ?? state.earlyMomentumScore ?? null,
     transactionQualityDetail: state.transactionQualityDetail ?? null,
+    continuationPrice1m: state.continuationPrice1m ?? null,
+    continuationPrice3m: state.continuationPrice3m ?? null,
+    continuationPrice5m: state.continuationPrice5m ?? null,
+    continuationPrice10m: state.continuationPrice10m ?? null,
+    continuationPrice15m: state.continuationPrice15m ?? null,
+    continuationPrice30m: state.continuationPrice30m ?? null,
+    continuationPrice60m: state.continuationPrice60m ?? null,
+    continuationReturn1m: state.continuationReturn1m ?? null,
+    continuationReturn3m: state.continuationReturn3m ?? null,
+    continuationReturn5m: state.continuationReturn5m ?? null,
+    continuationReturn10m: state.continuationReturn10m ?? null,
+    continuationReturn15m: state.continuationReturn15m ?? null,
+    continuationReturn30m: state.continuationReturn30m ?? null,
+    continuationReturn60m: state.continuationReturn60m ?? null,
+    continuationMfe60m: state.continuationMfe60m ?? null,
+    continuationMae60m: state.continuationMae60m ?? null,
     coingeckoId: state.coingeckoId ?? null,
     coingeckoFirstSeenAt: state.coingeckoFirstSeenAt ?? null,
     coingeckoPreviouslyNotListed: state.coingeckoPreviouslyNotListed ?? false,
@@ -447,6 +495,119 @@ function normalizeState(state: RadarCandidateState): RadarCandidateState {
 function returnFrom(base: number | null, price: number | null): number | null {
   if (base === null || price === null || base <= 0) return null;
   return Math.round((((price - base) / base) * 100) * 100) / 100;
+}
+
+
+type ContinuationPriceKey =
+  | "continuationPrice1m" | "continuationPrice3m" | "continuationPrice5m"
+  | "continuationPrice10m" | "continuationPrice15m" | "continuationPrice30m" | "continuationPrice60m";
+type ContinuationReturnKey =
+  | "continuationReturn1m" | "continuationReturn3m" | "continuationReturn5m"
+  | "continuationReturn10m" | "continuationReturn15m" | "continuationReturn30m" | "continuationReturn60m";
+
+const CONTINUATION_HORIZONS: Array<{
+  minMs: number;
+  maxMs: number;
+  priceKey: ContinuationPriceKey;
+  returnKey: ContinuationReturnKey;
+}> = [
+  { minMs: 30_000, maxMs: 110_000, priceKey: "continuationPrice1m", returnKey: "continuationReturn1m" },
+  { minMs: 2 * 60_000, maxMs: 4.5 * 60_000, priceKey: "continuationPrice3m", returnKey: "continuationReturn3m" },
+  { minMs: 4 * 60_000, maxMs: 6.5 * 60_000, priceKey: "continuationPrice5m", returnKey: "continuationReturn5m" },
+  { minMs: 8.5 * 60_000, maxMs: 12 * 60_000, priceKey: "continuationPrice10m", returnKey: "continuationReturn10m" },
+  { minMs: 13 * 60_000, maxMs: 18 * 60_000, priceKey: "continuationPrice15m", returnKey: "continuationReturn15m" },
+  { minMs: 27 * 60_000, maxMs: 34 * 60_000, priceKey: "continuationPrice30m", returnKey: "continuationReturn30m" },
+  { minMs: 55 * 60_000, maxMs: 68 * 60_000, priceKey: "continuationPrice60m", returnKey: "continuationReturn60m" },
+];
+
+function updateContinuationOutcomes(stateRaw: RadarCandidateState, now: number): RadarCandidateState {
+  const state = normalizeState(stateRaw);
+  if (state.firstDetectedPrice === null || state.firstDetectedPrice <= 0 || state.price === null || state.price <= 0) return state;
+  const detectedAt = new Date(state.firstDetectedAt).getTime();
+  if (!Number.isFinite(detectedAt)) return state;
+  const elapsed = now - detectedAt;
+  if (elapsed < 0) return state;
+
+  const next: RadarCandidateState = { ...state };
+  const bag = next as unknown as Record<string, number | null | undefined>;
+
+  for (const h of CONTINUATION_HORIZONS) {
+    if (bag[h.priceKey] == null && elapsed >= h.minMs && elapsed <= h.maxMs) {
+      bag[h.priceKey] = state.price;
+      bag[h.returnKey] = returnFrom(state.firstDetectedPrice, state.price);
+    }
+  }
+
+  if (elapsed <= 68 * 60_000) {
+    const currentReturn = returnFrom(state.firstDetectedPrice, state.price);
+    if (currentReturn !== null) {
+      next.continuationMfe60m = Math.max(next.continuationMfe60m ?? -Infinity, currentReturn);
+      next.continuationMae60m = Math.min(next.continuationMae60m ?? Infinity, currentReturn);
+    }
+  }
+  return next;
+}
+
+function continuationHeuristic(
+  state: RadarCandidateState,
+  empirical5m: ContinuationHorizonStats | null
+): { score: number; confidence: "low" | "medium" | "high"; reasons: string[] } {
+  const reasons: string[] = [];
+  let score = 0;
+
+  score += clamp(state.earlyMomentumScore ?? 0) * 0.35;
+
+  const quality = state.transactionQualityScore ?? 50;
+  score += quality * 0.20;
+  if (quality >= 80) reasons.push("atividade/transações com boa qualidade");
+  else if (quality < 40) reasons.push("qualidade de atividade fraca");
+
+  const tx = (state.buysM5 ?? 0) + (state.sellsM5 ?? 0);
+  const buyRatio = tx > 0 ? (state.buysM5 ?? 0) / tx : 0.5;
+  score += clamp(((buyRatio - 0.45) / 0.30) * 100) * 0.15;
+  if (tx >= 20 && buyRatio >= 0.62) reasons.push("pressão compradora acima da média");
+
+  const v5 = state.volumeM5 ?? 0;
+  const v1h = state.volumeH1 ?? 0;
+  const accel = v5 > 0 && v1h > 0 ? (v5 * 12) / v1h : null;
+  if (accel !== null) {
+    score += clamp((accel / 3) * 100) * 0.15;
+    if (accel >= 1.6) reasons.push("ritmo de volume 5m acelerado");
+  } else {
+    score += 45 * 0.15;
+  }
+
+  const liquidity = state.liquidityUsd ?? 0;
+  score += clamp(((Math.log10(Math.max(liquidity, 1)) - 4) / 1.5) * 100) * 0.10;
+
+  const pc5 = state.priceChangeM5 ?? 0;
+  let priceComponent = clamp(((pc5 + 2) / 22) * 100);
+  if (pc5 > 60) {
+    priceComponent *= 0.55;
+    reasons.push("movimento 5m já muito esticado");
+  } else if (pc5 >= 5 && pc5 <= 35) {
+    reasons.push("momentum 5m forte sem estar tão esticado");
+  }
+  score += priceComponent * 0.05;
+
+  if (empirical5m && empirical5m.sampleSize >= 20 && empirical5m.positiveRate !== null) {
+    const empirical = clamp(
+      empirical5m.positiveRate * 0.75 +
+      clamp((((empirical5m.medianReturn ?? 0) + 10) / 30) * 100) * 0.25
+    );
+    score = score * 0.75 + empirical * 0.25;
+    reasons.push(`backtest +5m disponível (n=${empirical5m.sampleSize})`);
+  }
+
+  if (state.activityInflationRisk === "critical") score -= 30;
+  else if (state.activityInflationRisk === "high") score -= 18;
+  if ((state.liquidityUsd ?? 0) < 25_000) score -= 8;
+  if ((state.priceChangeM5 ?? 0) < 0) score -= 15;
+
+  score = Math.round(clamp(score) * 10) / 10;
+  const n = empirical5m?.sampleSize ?? 0;
+  const confidence: "low" | "medium" | "high" = n >= 100 ? "high" : n >= 30 ? "medium" : "low";
+  return { score, confidence, reasons: reasons.slice(0, 4) };
 }
 
 function updateCoinGeckoOutcomes(state: RadarCandidateState, now: number): RadarCandidateState {
@@ -512,8 +673,13 @@ async function enrichCoinGecko(states: RadarCandidateState[], now: number): Prom
   });
 }
 
-function materialize(stateRaw: RadarCandidateState, now = Date.now()): RadarCandidate {
+function materialize(
+  stateRaw: RadarCandidateState,
+  now = Date.now(),
+  empirical5m: ContinuationHorizonStats | null = null
+): RadarCandidate {
   const state = normalizeState(stateRaw);
+  const continuation = continuationHeuristic(state, empirical5m);
   const cgKnown = Boolean(state.coingeckoId);
   const cgCheckedNotListed = state.coingeckoPreviouslyNotListed && !cgKnown;
   const lastSeenMs = new Date(state.lastSeenAt).getTime();
@@ -537,6 +703,18 @@ function materialize(stateRaw: RadarCandidateState, now = Date.now()): RadarCand
     activityPenalty: state.activityPenalty ?? 0,
     rawEarlyMomentumScore: state.rawEarlyMomentumScore ?? state.earlyMomentumScore ?? null,
     transactionQualityDetail: state.transactionQualityDetail ?? null,
+    continuationScore: continuation.score,
+    continuationConfidence: continuation.confidence,
+    continuationReasons: continuation.reasons,
+    continuationReturn1m: state.continuationReturn1m ?? null,
+    continuationReturn3m: state.continuationReturn3m ?? null,
+    continuationReturn5m: state.continuationReturn5m ?? null,
+    continuationReturn10m: state.continuationReturn10m ?? null,
+    continuationReturn15m: state.continuationReturn15m ?? null,
+    continuationReturn30m: state.continuationReturn30m ?? null,
+    continuationReturn60m: state.continuationReturn60m ?? null,
+    continuationMfe60m: state.continuationMfe60m ?? null,
+    continuationMae60m: state.continuationMae60m ?? null,
     boosted: state.source !== "latest_profile",
     dexUrl: `https://dexscreener.com/${state.chain}/${state.pairAddress ?? state.address}`,
     visibleSource: cgKnown ? "coingecko" : "dexscreener",
@@ -559,6 +737,22 @@ function horizonStats(values: Array<number | null>): CoinGeckoHorizonStats {
     sampleSize: real.length,
     medianReturn: median(real),
     positiveRate: real.length ? Math.round((real.filter((v) => v > 0).length / real.length) * 1000) / 10 : null,
+  };
+}
+
+
+function continuationStats(statesRaw: RadarCandidateState[]): ContinuationStats {
+  const states = statesRaw.map(normalizeState);
+  return {
+    observedDetections: states.length,
+    note: "Mede resultados desde a primeira deteção; horizons perdidos pelo monitor ficam N/D.",
+    return1m: horizonStats(states.map((s) => s.continuationReturn1m ?? null)),
+    return3m: horizonStats(states.map((s) => s.continuationReturn3m ?? null)),
+    return5m: horizonStats(states.map((s) => s.continuationReturn5m ?? null)),
+    return10m: horizonStats(states.map((s) => s.continuationReturn10m ?? null)),
+    return15m: horizonStats(states.map((s) => s.continuationReturn15m ?? null)),
+    return30m: horizonStats(states.map((s) => s.continuationReturn30m ?? null)),
+    return60m: horizonStats(states.map((s) => s.continuationReturn60m ?? null)),
   };
 }
 
@@ -664,6 +858,22 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
         activityPenalty: scored.transactionQuality.penalty,
         rawEarlyMomentumScore: scored.rawScore,
         transactionQualityDetail: scored.transactionQuality.detail,
+        continuationPrice1m: prior?.continuationPrice1m ?? null,
+        continuationPrice3m: prior?.continuationPrice3m ?? null,
+        continuationPrice5m: prior?.continuationPrice5m ?? null,
+        continuationPrice10m: prior?.continuationPrice10m ?? null,
+        continuationPrice15m: prior?.continuationPrice15m ?? null,
+        continuationPrice30m: prior?.continuationPrice30m ?? null,
+        continuationPrice60m: prior?.continuationPrice60m ?? null,
+        continuationReturn1m: prior?.continuationReturn1m ?? null,
+        continuationReturn3m: prior?.continuationReturn3m ?? null,
+        continuationReturn5m: prior?.continuationReturn5m ?? null,
+        continuationReturn10m: prior?.continuationReturn10m ?? null,
+        continuationReturn15m: prior?.continuationReturn15m ?? null,
+        continuationReturn30m: prior?.continuationReturn30m ?? null,
+        continuationReturn60m: prior?.continuationReturn60m ?? null,
+        continuationMfe60m: prior?.continuationMfe60m ?? null,
+        continuationMae60m: prior?.continuationMae60m ?? null,
         source: seed.source,
         boostAmount: seed.boostAmount,
         earlyMomentumScore: scored.score,
@@ -684,14 +894,15 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
         coingeckoReturn6h: prior?.coingeckoReturn6h ?? null,
         coingeckoReturn24h: prior?.coingeckoReturn24h ?? null,
       });
-      states.push(state);
+      states.push(updateContinuationOutcomes(state, now));
     }
 
     const enriched = await enrichCoinGecko(states, now);
     for (const state of enriched) await storage.setRadarCandidate(state, RADAR_TTL_SECONDS);
 
     const allStored = (await storage.listRadarCandidates()).map(normalizeState);
-    const materializedAll = allStored.map((state) => materialize(state, now));
+    const contStats = continuationStats(allStored);
+    const materializedAll = allStored.map((state) => materialize(state, now, contStats.return5m));
     const candidates = materializedAll
       .filter((candidate) => candidate.currentStatus === "live")
       .sort((a, b) => b.earlyMomentumScore - a.earlyMomentumScore || a.ageMinutes - b.ageMinutes);
@@ -711,12 +922,14 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
       scannedTokens: scanSeeds.size,
       rejectedTokens: rejected,
       listingEffect: listingEffectStats(allStored),
-      note: "Descoberta primária via DexScreener; CoinGecko é verificada depois por contrato e passa a ter prioridade como source visível quando confirmada. Máximo de 4 verificações CoinGecko por ciclo para respeitar rate limits.",
+      continuation: contStats,
+      note: "Descoberta primária via DexScreener; CoinGecko é verificada depois por contrato. Continuation Score é experimental e mede qualidade de continuação, não probabilidade garantida de lucro. Máximo de 4 verificações CoinGecko por ciclo para respeitar rate limits.",
     };
   } catch (err) {
     console.error("[MemeScope][Radar] refresh failed:", err instanceof Error ? err.message : String(err));
     const previousStates = await storage.listRadarCandidates();
-    const materializedPrevious = previousStates.map((s) => materialize(s));
+    const previousContinuation = continuationStats(previousStates);
+    const materializedPrevious = previousStates.map((s) => materialize(s, Date.now(), previousContinuation.return5m));
     const previous = materializedPrevious.filter((c) => c.currentStatus === "live").sort((a, b) => b.earlyMomentumScore - a.earlyMomentumScore);
     const recentCandidates = materializedPrevious.filter((c) => c.currentStatus !== "live").slice(0, 30);
     return {
@@ -728,6 +941,7 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
       scannedTokens: 0,
       rejectedTokens: 0,
       listingEffect: listingEffectStats(previousStates),
+      continuation: previousContinuation,
       note: previous.length ? "A mostrar os últimos candidatos guardados enquanto o feed recupera." : "Feed de descoberta temporariamente indisponível.",
       error: err instanceof Error ? err.message : "RADAR_UNAVAILABLE",
     };

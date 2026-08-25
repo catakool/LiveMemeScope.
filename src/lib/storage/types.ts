@@ -160,6 +160,24 @@ export interface RadarCandidateState {
   rawEarlyMomentumScore?: number | null;
   transactionQualityDetail?: string | null;
 
+  /** Backtest de continuação desde a primeira deteção do Radar. */
+  continuationPrice1m?: number | null;
+  continuationPrice3m?: number | null;
+  continuationPrice5m?: number | null;
+  continuationPrice10m?: number | null;
+  continuationPrice15m?: number | null;
+  continuationPrice30m?: number | null;
+  continuationPrice60m?: number | null;
+  continuationReturn1m?: number | null;
+  continuationReturn3m?: number | null;
+  continuationReturn5m?: number | null;
+  continuationReturn10m?: number | null;
+  continuationReturn15m?: number | null;
+  continuationReturn30m?: number | null;
+  continuationReturn60m?: number | null;
+  continuationMfe60m?: number | null;
+  continuationMae60m?: number | null;
+
   /** Como o token apareceu no feed da DexScreener. */
   source: "latest_profile" | "boosted" | "both";
   boostAmount: number | null;

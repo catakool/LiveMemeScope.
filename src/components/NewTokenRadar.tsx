@@ -7,6 +7,7 @@ import type {
   RadarClassification,
   VisibleRadarSource,
   CoinGeckoHorizonStats,
+  ContinuationHorizonStats,
 } from "@/lib/newTokenRadar";
 import { formatUsd, formatPercent } from "@/lib/format";
 import { CHAIN_LABEL } from "@/lib/tiers";
@@ -61,6 +62,15 @@ function TransactionQualityBadge({ c }: { c: RadarCandidate }) {
   return <span className="rounded-full border border-[var(--accent-opportunity)]/40 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-opportunity)]">✓ Activity: HEALTHY</span>;
 }
 
+
+function ContinuationBadge({ c }: { c: RadarCandidate }) {
+  const cls =
+    c.continuationScore >= 75 ? "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]" :
+    c.continuationScore >= 55 ? "border-[var(--accent-gold)]/50 text-[var(--accent-gold)]" :
+    "border-[var(--accent-risk)]/45 text-[var(--accent-risk)]";
+  return <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${cls}`}>↗ Continuation {c.continuationScore.toFixed(0)}</span>;
+}
+
 function Card({ c }: { c: RadarCandidate }) {
   const m = META[c.classification];
   const tx = (c.buysM5 ?? 0) + (c.sellsM5 ?? 0);
@@ -81,6 +91,7 @@ function Card({ c }: { c: RadarCandidate }) {
             )}
             <SourceBadge c={c} />
             <TransactionQualityBadge c={c} />
+            <ContinuationBadge c={c} />
             {c.isPreCoinGecko && <span className="rounded-full border border-[var(--accent-gold)]/45 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-gold)]">Pre-CoinGecko watch</span>}
           </div>
           <div className="mt-1 text-[10px] text-[var(--text-faint)]">
@@ -99,6 +110,38 @@ function Card({ c }: { c: RadarCandidate }) {
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">Volume 5m</div><div className="font-data font-semibold">{formatUsd(c.volumeM5, { compact: true })}</div></div>
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">Liquidez</div><div className="font-data font-semibold">{formatUsd(c.liquidityUsd, { compact: true })}</div></div>
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">{c.marketCapIsFdv ? "FDV*" : "Market cap"}</div><div className="font-data font-semibold">{formatUsd(c.marketCapOrFdv, { compact: true })}</div></div>
+      </div>
+
+      <div className="rounded-lg border border-[var(--accent-info)]/20 bg-[var(--surface-2)] p-3 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[var(--accent-info)]">Continuation Score · experimental</div>
+            <div className="text-[10px] text-[var(--text-faint)]">Procura continuação de momentum nos próximos minutos; não é probabilidade de lucro.</div>
+          </div>
+          <div className="text-right">
+            <div className={`font-data text-lg font-bold ${c.continuationScore >= 75 ? "text-[var(--accent-opportunity)]" : c.continuationScore >= 55 ? "text-[var(--accent-gold)]" : "text-[var(--accent-risk)]"}`}>{c.continuationScore.toFixed(0)}/100</div>
+            <div className="text-[9px] text-[var(--text-faint)]">confiança: {c.continuationConfidence}</div>
+          </div>
+        </div>
+        {!!c.continuationReasons.length && <div className="text-[10px] text-[var(--text-muted)]">{c.continuationReasons.join(" · ")}</div>}
+        <div className="grid grid-cols-3 sm:grid-cols-7 gap-1.5 text-[10px]">
+          {[
+            ["+1m", c.continuationReturn1m], ["+3m", c.continuationReturn3m], ["+5m", c.continuationReturn5m],
+            ["+10m", c.continuationReturn10m], ["+15m", c.continuationReturn15m], ["+30m", c.continuationReturn30m],
+            ["+60m", c.continuationReturn60m],
+          ].map(([label, value]) => (
+            <div key={String(label)} className="rounded-md bg-[var(--surface)] p-1.5">
+              <div className="text-[var(--text-faint)]">{label}</div>
+              <div className={`font-data font-semibold ${changeCls(value as number | null)}`}>{formatPercent(value as number | null)}</div>
+            </div>
+          ))}
+        </div>
+        {(c.continuationMfe60m !== null || c.continuationMae60m !== null) && (
+          <div className="text-[10px] text-[var(--text-muted)]">
+            MFE 60m: <b className={changeCls(c.continuationMfe60m)}>{formatPercent(c.continuationMfe60m)}</b>
+            {" · "}MAE 60m: <b className={changeCls(c.continuationMae60m)}>{formatPercent(c.continuationMae60m)}</b>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
@@ -164,6 +207,15 @@ function Card({ c }: { c: RadarCandidate }) {
   );
 }
 
+
+function ContinuationHorizon({ label, stats }: { label: string; stats: ContinuationHorizonStats }) {
+  return <div className="rounded-lg bg-[var(--surface-2)] p-2.5">
+    <div className="text-[10px] text-[var(--text-faint)]">{label}</div>
+    <div className={`font-data text-sm font-semibold ${changeCls(stats.medianReturn)}`}>{stats.medianReturn === null ? "N/D" : `${stats.medianReturn >= 0 ? "+" : ""}${stats.medianReturn.toFixed(1)}%`}</div>
+    <div className="text-[9px] text-[var(--text-faint)]">{stats.positiveRate === null ? "sem amostra" : `${stats.positiveRate.toFixed(0)}% positivos`} · n={stats.sampleSize}</div>
+  </div>;
+}
+
 function Horizon({ label, stats }: { label: string; stats: CoinGeckoHorizonStats }) {
   return <div className="rounded-lg bg-[var(--surface-2)] p-2.5">
     <div className="text-[10px] text-[var(--text-faint)]">{label}</div>
@@ -220,7 +272,7 @@ export default function NewTokenRadar() {
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2"><span className="text-xl">🚀</span><h2 className="font-display text-lg font-semibold">New Token Radar</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] ${feed?.status === "live" ? "border-[var(--accent-opportunity)]/40 text-[var(--accent-opportunity)]" : "border-[var(--accent-risk)]/40 text-[var(--accent-risk)]"}`}>{feed?.status === "live" ? "LIVE" : "INDISPONÍVEL"}</span></div>
-          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> mostra apenas tokens que passam os gates agora. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato. O score também penaliza atividade inflacionada quando há muitas transações para pouco volume real.</p>
+          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> mostra apenas tokens que passam os gates agora. O <b>Continuation Score</b> tenta separar “está a subir” de “tem condições para continuar alguns minutos”. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato. O score também penaliza atividade inflacionada quando há muitas transações para pouco volume real.</p>
         </div>
         <div className="grid grid-cols-4 gap-2 text-center shrink-0">
           <div className="rounded-lg bg-[var(--surface-2)] px-3 py-2"><div className="font-data font-bold text-[var(--accent-risk)]">{count("explosive")}</div><div className="text-[9px] text-[var(--text-faint)]">EXPLOSIVE</div></div>
@@ -230,6 +282,26 @@ export default function NewTokenRadar() {
         </div>
       </div>
     </div>
+
+    {feed && <div className="rounded-xl border border-[var(--accent-info)]/25 bg-[var(--surface)] p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="font-display text-sm font-semibold">⏱ Momentum Continuation Backtest</div>
+          <div className="text-[10px] text-[var(--text-faint)]">Mede o que aconteceu depois da primeira deteção. Se o monitor não observou um horizonte perto do momento certo, fica N/D.</div>
+        </div>
+        <span className="text-[10px] text-[var(--text-muted)]">Deteções guardadas: <b className="font-data text-[var(--text)]">{feed.continuation.observedDetections}</b></span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2">
+        <ContinuationHorizon label="+1m" stats={feed.continuation.return1m} />
+        <ContinuationHorizon label="+3m" stats={feed.continuation.return3m} />
+        <ContinuationHorizon label="+5m" stats={feed.continuation.return5m} />
+        <ContinuationHorizon label="+10m" stats={feed.continuation.return10m} />
+        <ContinuationHorizon label="+15m" stats={feed.continuation.return15m} />
+        <ContinuationHorizon label="+30m" stats={feed.continuation.return30m} />
+        <ContinuationHorizon label="+60m" stats={feed.continuation.return60m} />
+      </div>
+      <div className="text-[9px] text-[var(--text-faint)]">O Continuation Score só começa a incorporar o backtest +5m quando n≥20. Até lá a confiança aparece LOW e o score é principalmente heurístico.</div>
+    </div>}
 
     {feed && <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
