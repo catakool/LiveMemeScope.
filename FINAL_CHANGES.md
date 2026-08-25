@@ -1,3 +1,18 @@
+# MemeScope v12 — Dual Source + Pre-CoinGecko tracking
+
+- New Token Radar mantiene DexScreener como fuente primaria de descubrimiento temprano.
+- Cada candidato muestra ahora `Source: DexScreener` o `Source: CoinGecko`.
+- Si un contrato existe en ambas fuentes, CoinGecko tiene prioridad como `Source`, pero se conserva `Origem: DexScreener` y la fecha/precio de la primera detección de MemeScope.
+- Verificación CoinGecko por contrato, no por símbolo/nombre, para evitar asociaciones ambiguas.
+- Máximo de 4 verificaciones CoinGecko por ciclo + recheck persistente cada 15 min para DEX-only, reduciendo presión sobre rate limits.
+- Nuevo estado `DEX Mature`: tokens de 6h–7d con liquidez y actividad sostenidas, aunque ya no estén explotando en los últimos 5 minutos.
+- Nuevo filtro `Pre-CoinGecko`: contrato confirmado como ainda no listado en CoinGecko por MemeScope.
+- Se guarda `coingeckoFirstSeenAt` como la primera confirmación OBSERVADA por MemeScope. No se presenta como fecha oficial de listing.
+- Si MemeScope confirmó primero `not_listed` y posteriormente `listed`, registra el evento `DEX-only → CoinGecko` y el precio en ese momento.
+- Nuevo panel `CoinGecko Listing Effect`: mediana de retorno y porcentaje positivo a +15m/+1h/+6h/+24h usando únicamente transiciones observadas.
+- Los outcomes usan ventanas de tolerancia; si faltó monitorización alrededor del horizonte, se guarda N/D en vez de falsear el resultado.
+- Dashboard cards/table muestran Source: CoinGecko cuando hay MarketData de CoinGecko y DexScreener para tokens DEX-only.
+
 # MemeScope v10 — Tendências resilientes
 
 - GDELT: as 3 pesquisas passam a correr em paralelo, evitando o padrão 10s + 10s + 10s observado nos logs da Vercel.

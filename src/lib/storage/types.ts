@@ -120,12 +120,52 @@ export interface CurrentTokenState {
 
 
 export interface RadarCandidateState {
-  tokenKey: string; chain: Chain; address: string; name: string; symbol: string; pairAddress: string | null; dexId: string | null;
-  pairCreatedAt: string; firstDetectedAt: string; firstDetectedPrice: number | null; lastSeenAt: string; price: number | null;
-  liquidityUsd: number | null; marketCapOrFdv: number | null; marketCapIsFdv: boolean; volumeM5: number | null; volumeH1: number | null;
-  buysM5: number | null; sellsM5: number | null; priceChangeM5: number | null; priceChangeH1: number | null;
-  source: "latest_profile" | "boosted" | "both"; boostAmount: number | null; earlyMomentumScore: number;
-  classification: "explosive" | "breakout" | "emerging"; reasons: string[]; risks: string[];
+  tokenKey: string;
+  chain: Chain;
+  address: string;
+  name: string;
+  symbol: string;
+  pairAddress: string | null;
+  dexId: string | null;
+  pairCreatedAt: string;
+  firstDetectedAt: string;
+  firstDetectedPrice: number | null;
+  lastSeenAt: string;
+  price: number | null;
+  liquidityUsd: number | null;
+  marketCapOrFdv: number | null;
+  marketCapIsFdv: boolean;
+  volumeM5: number | null;
+  volumeH1: number | null;
+  volumeH24: number | null;
+  buysM5: number | null;
+  sellsM5: number | null;
+  buysH1: number | null;
+  sellsH1: number | null;
+  priceChangeM5: number | null;
+  priceChangeH1: number | null;
+
+  /** Como o token apareceu no feed da DexScreener. */
+  source: "latest_profile" | "boosted" | "both";
+  boostAmount: number | null;
+  earlyMomentumScore: number;
+  classification: "explosive" | "breakout" | "emerging" | "mature";
+  reasons: string[];
+  risks: string[];
+
+  /** CoinGecko tem prioridade como source visível quando o contrato é confirmado lá. */
+  coingeckoId: string | null;
+  coingeckoFirstSeenAt: string | null;
+  coingeckoPreviouslyNotListed: boolean;
+  coingeckoTransitionObservedAt: string | null;
+  priceAtCoinGeckoTransition: number | null;
+  nextCoinGeckoCheckAt: string | null;
+
+  /** Outcomes observados pela MemeScope após uma transição DEX-only -> CoinGecko. */
+  coingeckoReturn15m: number | null;
+  coingeckoReturn1h: number | null;
+  coingeckoReturn6h: number | null;
+  coingeckoReturn24h: number | null;
 }
 
 /** Diagnóstico do job de monitorização, para o endpoint de health (Fase 17). */

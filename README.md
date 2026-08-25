@@ -577,3 +577,12 @@ A interface inclui agora uma aba **Tendências** separada da dashboard. Ela comb
 2. **Catalisadores de notícias** — `GET /api/trends` consulta a GDELT DOC 2.0 (janela recente de 12 horas), classifica títulos por categorias como influencer, listing, adoção, regulação e segurança e apresenta uma força heurística baseada em recência/relevância.
 
 A força de um catalisador **não é uma probabilidade de subida**. Nesta versão as notícias ainda não alteram diretamente o Opportunity Score: servem como camada explicativa/observacional. Isto evita que uma menção isolada, uma notícia negativa ou um título ambíguo gere automaticamente uma recomendação de entrada. X/Twitter e Reddit não são usados nesta versão.
+
+
+## V12 — Dual Source / Pre-CoinGecko
+
+O New Token Radar usa **DexScreener para descoberta precoce** e verifica depois cada contrato na **CoinGecko**. Se o token existir nas duas fontes, a UI mostra `Source: CoinGecko`, mas preserva a origem da descoberta (`DexScreener`) e o primeiro preço/data observados pela MemeScope.
+
+A aplicação NÃO assume que a presença na CoinGecko causa subida. Quando a MemeScope observou previamente um token como DEX-only e depois o confirma na CoinGecko, guarda esse evento e mede retornos +15m/+1h/+6h/+24h. O painel `CoinGecko Listing Effect` apresenta mediana, percentagem de casos positivos e tamanho da amostra. `coingeckoFirstSeenAt` significa **primeira confirmação pela MemeScope**, não data oficial de listing da CoinGecko.
+
+Para respeitar rate limits, o Radar faz no máximo 4 verificações de contrato CoinGecko por ciclo e candidatos DEX-only só voltam a ser verificados depois do intervalo persistido.

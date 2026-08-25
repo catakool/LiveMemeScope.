@@ -99,6 +99,7 @@ export default function CoinTable({
                 {col.label} {sortKey === col.key ? (sortDir === 1 ? "↑" : "↓") : ""}
               </th>
             ))}
+            <th className="text-left px-3 py-2 text-xs text-[var(--text-faint)] font-normal whitespace-nowrap">Source</th>
           </tr>
         </thead>
         <tbody>
@@ -135,6 +136,11 @@ export default function CoinTable({
               </td>
               <td className="px-3 py-2 font-data whitespace-nowrap text-[var(--accent-risk)]">
                 {r.scores.risk.score ?? "N/D"}
+              </td>
+              <td className="px-3 py-2 whitespace-nowrap">
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${r.market ? "border-[var(--accent-opportunity)]/35 text-[var(--accent-opportunity)]" : "border-[var(--accent-info)]/35 text-[var(--accent-info)]"}`}>
+                  {r.market ? "CoinGecko" : "DexScreener"}
+                </span>
               </td>
             </tr>
           ))}

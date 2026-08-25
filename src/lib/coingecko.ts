@@ -160,6 +160,79 @@ const CATEGORY_TTL_MS = 90_000;
 const TRENDING_TTL_MS = 90_000;
 const COIN_DETAIL_TTL_MS = 60 * 60_000; // 1h — contrato e data de génese não mudam
 
+
+const CONTRACT_LOOKUP_POSITIVE_TTL_MS = 6 * 60 * 60_000;
+const CONTRACT_LOOKUP_NEGATIVE_TTL_MS = 15 * 60_000;
+
+const CONTRACT_PLATFORM_BY_CHAIN: Record<string, string> = {
+  ethereum: "ethereum",
+  solana: "solana",
+  base: "base",
+  bsc: "binance-smart-chain",
+};
+
+export interface CoinGeckoContractMatch {
+  id: string;
+  symbol: string;
+  name: string;
+}
+
+export interface CoinGeckoContractLookup {
+  status: "listed" | "not_listed" | "unavailable";
+  match: CoinGeckoContractMatch | null;
+}
+
+/**
+ * Confirma se um contrato já existe na CoinGecko.
+ *
+ * Isto NÃO representa a data oficial de listing da CoinGecko. O New Token
+ * Radar guarda separadamente a primeira vez em que a própria MemeScope
+ * confirmou o contrato na CoinGecko e, quando observou previamente o estado
+ * `not_listed`, consegue registar a transição DEX-only -> CoinGecko.
+ */
+export async function resolveCoinGeckoByContract(
+  chain: string,
+  address: string
+): Promise<CoinGeckoContractLookup> {
+  const platform = CONTRACT_PLATFORM_BY_CHAIN[chain];
+  if (!platform || !address) return { status: "unavailable", match: null };
+
+  const normalized = address.trim().toLowerCase();
+  const key = `coingecko:contract:${platform}:${normalized}`;
+  const cached = cacheGet<CoinGeckoContractLookup>(key);
+  if (cached) return cached.value;
+
+  return withCoalescing(key, async () => {
+    try {
+      const url = `${BASE}/coins/${encodeURIComponent(platform)}/contract/${encodeURIComponent(address)}?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false`;
+      const res = await fetch(url, { headers: headers(), cache: "no-store" });
+
+      if (res.status === 404) {
+        const result: CoinGeckoContractLookup = { status: "not_listed", match: null };
+        cacheSet(key, result, CONTRACT_LOOKUP_NEGATIVE_TTL_MS);
+        return result;
+      }
+      if (res.status === 429 || !res.ok) return { status: "unavailable", match: null };
+
+      const raw = await res.json() as { id?: string; symbol?: string; name?: string };
+      if (!raw.id) return { status: "unavailable", match: null };
+
+      const result: CoinGeckoContractLookup = {
+        status: "listed",
+        match: {
+          id: raw.id,
+          symbol: raw.symbol?.toUpperCase() ?? "",
+          name: raw.name ?? raw.id,
+        },
+      };
+      cacheSet(key, result, CONTRACT_LOOKUP_POSITIVE_TTL_MS);
+      return result;
+    } catch {
+      return { status: "unavailable", match: null };
+    }
+  });
+}
+
 /** Universo de candidatas: todas as moedas da categoria "Meme" da CoinGecko, por volume. */
 export async function getMemeCategoryMarkets(): Promise<{ data: MarketData[]; meta: SourceMeta }> {
   const key = "discovery:meme-universe";

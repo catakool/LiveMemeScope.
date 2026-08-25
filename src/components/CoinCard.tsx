@@ -81,6 +81,9 @@ export default function CoinCard({
               {tier.label}
             </span>
             <span className="text-[10px] text-[var(--text-faint)]">{CHAIN_LABEL[def.chain]}</span>
+            <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${market ? "border-[var(--accent-opportunity)]/35 text-[var(--accent-opportunity)]" : "border-[var(--accent-info)]/35 text-[var(--accent-info)]"}`}>
+              Source: {market ? "CoinGecko" : "DexScreener"}
+            </span>
           </div>
           {reasons && reasons.length > 0 && (
             <div className="mt-1 flex items-center gap-1 flex-wrap">
