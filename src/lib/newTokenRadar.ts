@@ -4,7 +4,7 @@ import { Chain } from "./types";
 import { getStorage, RadarCandidateState } from "./storage";
 
 const BASE = "https://api.dexscreener.com";
-const CACHE_KEY = "new-token-radar:v2";
+const CACHE_KEY = "new-token-radar:v3";
 const CACHE_TTL_MS = 45_000;
 const RADAR_TTL_SECONDS = 8 * 24 * 60 * 60;
 const RECENT_DETECTION_WINDOW_MS = 48 * 60 * 60_000;
@@ -97,6 +97,15 @@ export interface RadarCandidate {
   sellsH1: number | null;
   priceChangeM5: number | null;
   priceChangeH1: number | null;
+
+  /** Anti-inflation proxy built from aggregate DEX data, not individual trades. */
+  transactionQualityScore: number | null;
+  averageTradeUsdM5: number | null;
+  activityInflationRisk: "low" | "medium" | "high" | "critical" | "unknown";
+  activityPenalty: number;
+  rawEarlyMomentumScore: number | null;
+  transactionQualityDetail: string | null;
+
   source: RadarSource;
   visibleSource: VisibleRadarSource;
   originSource: "dexscreener";
@@ -137,10 +146,87 @@ function chainOf(raw?: string): Chain | null { return raw ? SUPPORTED_CHAINS[raw
 function keyOf(chain: Chain, address: string) { return `${chain}:${address.toLowerCase()}`; }
 function iso(ms: number) { return new Date(ms).toISOString(); }
 
+
+interface TransactionQuality {
+  score: number | null;
+  averageTradeUsd: number | null;
+  risk: "low" | "medium" | "high" | "critical" | "unknown";
+  penalty: number;
+  detail: string | null;
+  hardReject: boolean;
+}
+
+/**
+ * DexScreener's public pair feed exposes aggregate volume + transaction counts,
+ * not each trade's USD amount. We therefore use a conservative anti-inflation
+ * proxy: average USD turnover per transaction over 5m.
+ *
+ * This catches patterns such as thousands of txns generating only a few dollars
+ * of real volume, without claiming those trades are proven "fake".
+ */
+function transactionQuality(volumeM5: number | null, tx5: number): TransactionQuality {
+  if (volumeM5 === null || volumeM5 < 0 || tx5 <= 0) {
+    return {
+      score: null,
+      averageTradeUsd: null,
+      risk: "unknown",
+      penalty: 0,
+      detail: "Qualidade de transações indisponível: volume/contagem 5m incompletos",
+      hardReject: false,
+    };
+  }
+
+  const avg = volumeM5 / tx5;
+  let score: number;
+  let risk: TransactionQuality["risk"];
+  let penalty: number;
+  let hardReject = false;
+
+  if (avg < 0.05) {
+    score = 0; risk = "critical"; penalty = 35; hardReject = tx5 >= 30;
+  } else if (avg < 0.25) {
+    score = 12; risk = "critical"; penalty = 30; hardReject = tx5 >= 60;
+  } else if (avg < 1) {
+    score = 30; risk = "high"; penalty = 20;
+  } else if (avg < 3) {
+    score = 50; risk = "medium"; penalty = 12;
+  } else if (avg < 10) {
+    score = 70; risk = "medium"; penalty = 5;
+  } else if (avg < 25) {
+    score = 85; risk = "low"; penalty = 0;
+  } else {
+    score = 100; risk = "low"; penalty = 0;
+  }
+
+  // Very high transaction density with low average size is a second warning.
+  // We do not call it wash trading because aggregate data cannot prove that.
+  if (tx5 >= 500 && avg < 2) {
+    penalty = Math.max(penalty, 25);
+    risk = avg < 0.5 ? "critical" : "high";
+    if (avg < 0.5) hardReject = true;
+  }
+
+  return {
+    score,
+    averageTradeUsd: Math.round(avg * 10000) / 10000,
+    risk,
+    penalty,
+    detail: `${tx5.toLocaleString("en-US")} tx em 5m · volume/tx médio ≈ $${avg < 0.01 ? avg.toFixed(4) : avg.toFixed(2)}`,
+    hardReject,
+  };
+}
+
 function scorePair(
   pair: RawPair,
   source: RadarSource
-): { score: number; classification: RadarClassification | null; reasons: string[]; risks: string[] } {
+): {
+  score: number;
+  rawScore: number;
+  classification: RadarClassification | null;
+  reasons: string[];
+  risks: string[];
+  transactionQuality: TransactionQuality;
+} {
   const liquidity = num(pair.liquidity?.usd);
   const v5 = num(pair.volume?.m5);
   const v1h = num(pair.volume?.h1);
@@ -153,17 +239,18 @@ function scorePair(
   const sells1h = num(pair.txns?.h1?.sells) ?? 0;
   const tx1h = buys1h + sells1h;
   const created = num(pair.pairCreatedAt);
+  const tq = transactionQuality(v5, tx5);
 
-  if (!created) return { score: 0, classification: null, reasons: [], risks: ["Idade do par indisponível"] };
+  if (!created) return { score: 0, rawScore: 0, classification: null, reasons: [], risks: ["Idade do par indisponível"], transactionQuality: tq };
   const ageMin = Math.max(0, (Date.now() - created) / 60_000);
   const reasons: string[] = [];
   const risks: string[] = [];
 
   if (ageMin > MAX_PAIR_AGE_MINUTES) {
-    return { score: 0, classification: null, reasons, risks: ["Par fora da janela de 7 dias do Radar"] };
+    return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Par fora da janela de 7 dias do Radar"], transactionQuality: tq };
   }
   if (liquidity === null || liquidity < 10_000) {
-    return { score: 0, classification: null, reasons, risks: ["Liquidez inferior a $10k"] };
+    return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Liquidez inferior a $10k"], transactionQuality: tq };
   }
 
   // Depois de 6h o token pode entrar em DEX Mature mesmo sem estar a explodir
@@ -176,8 +263,8 @@ function scorePair(
 
   // Para descoberta realmente precoce mantemos gates mais fortes de 5m.
   if (!matureEligible) {
-    if (tx5 < 10) return { score: 0, classification: null, reasons, risks: ["Poucas transações nos últimos 5m"] };
-    if (v5 === null || v5 < 1_500) return { score: 0, classification: null, reasons, risks: ["Volume 5m insuficiente"] };
+    if (tx5 < 10) return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Poucas transações nos últimos 5m"], transactionQuality: tq };
+    if (v5 === null || v5 < 1_500) return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Volume 5m insuficiente"], transactionQuality: tq };
   }
 
   let score = 0;
@@ -195,11 +282,25 @@ function scorePair(
   score += clamp((turnover5 / 0.55) * 24, 0, 24);
   if (turnover5 >= 0.2) reasons.push(`Volume 5m equivale a ${(turnover5 * 100).toFixed(0)}% da liquidez`);
 
+  const qualityFactor = tq.score === null ? 0.65 : clamp(tq.score / 100, 0.05, 1);
   const txForScore = Math.max(tx5, Math.min(tx1h / 12, 300));
-  score += clamp((Math.log10(Math.max(txForScore, 10) / 10 + 1) / Math.log10(11)) * 13, 0, 13);
+  const txContribution = clamp((Math.log10(Math.max(txForScore, 10) / 10 + 1) / Math.log10(11)) * 13, 0, 13);
+  score += txContribution * qualityFactor;
+
   const buyRatio = tx5 > 0 ? buys5 / tx5 : tx1h > 0 ? buys1h / tx1h : 0.5;
-  score += clamp(((buyRatio - 0.45) / 0.35) * 15, 0, 15);
-  if (tx5 >= 20 && buyRatio >= 0.62) reasons.push(`${(buyRatio * 100).toFixed(0)}% das transações 5m são compras`);
+  const buyContribution = clamp(((buyRatio - 0.45) / 0.35) * 15, 0, 15);
+  score += buyContribution * qualityFactor;
+  if (tx5 >= 20 && buyRatio >= 0.62 && qualityFactor >= 0.5) reasons.push(`${(buyRatio * 100).toFixed(0)}% das transações 5m são compras`);
+
+  if (tq.risk === "critical") {
+    risks.push(`Atividade potencialmente inflacionada — ${tq.detail}`);
+  } else if (tq.risk === "high") {
+    risks.push(`Qualidade de atividade baixa — ${tq.detail}`);
+  } else if (tq.risk === "medium" && tq.averageTradeUsd !== null && tq.averageTradeUsd < 3) {
+    risks.push(`Muitas transações pequenas face ao volume — ${tq.detail}`);
+  } else if (tq.risk === "low" && tq.detail) {
+    reasons.push(`Atividade com volume/tx plausível — ${tq.detail}`);
+  }
 
   if (ageMin <= 30) score += 10;
   else if (ageMin <= 120) score += 8;
@@ -214,17 +315,23 @@ function scorePair(
   if (ageMin < 10) risks.push("Par extremamente recente (<10 min)");
   if (v1h !== null && v5 !== null && v5 * 12 > v1h * 4) reasons.push("Ritmo de volume 5m muito acima do ritmo da última hora");
 
-  score = Math.round(clamp(score) * 10) / 10;
+  const rawScore = Math.round(clamp(score) * 10) / 10;
+  score = Math.round(clamp(rawScore - tq.penalty) * 10) / 10;
+
   let classification: RadarClassification | null = null;
-  if (score >= 85 && liquidity >= 25_000 && tx5 >= 30 && (pc5 ?? 0) >= 8) classification = "explosive";
-  else if (score >= 70 && liquidity >= 15_000 && tx5 >= 20 && (pc5 ?? 0) >= 4) classification = "breakout";
-  else if (score >= 55 && (pc5 ?? 0) > 0) classification = "emerging";
-  else if (matureEligible) {
-    classification = "mature";
-    reasons.push("DEX Mature: atividade e liquidez sustentadas apesar de já não estar na fase inicial");
+  if (!tq.hardReject) {
+    if (score >= 85 && liquidity >= 25_000 && tx5 >= 30 && (pc5 ?? 0) >= 8 && tq.risk !== "high" && tq.risk !== "critical") classification = "explosive";
+    else if (score >= 70 && liquidity >= 15_000 && tx5 >= 20 && (pc5 ?? 0) >= 4 && tq.risk !== "critical") classification = "breakout";
+    else if (score >= 55 && (pc5 ?? 0) > 0) classification = "emerging";
+    else if (matureEligible && tq.risk !== "critical") {
+      classification = "mature";
+      reasons.push("DEX Mature: atividade e liquidez sustentadas apesar de já não estar na fase inicial");
+    }
+  } else {
+    risks.unshift("Excluído do Live Radar: atividade agregada incompatível com o número de transações");
   }
 
-  return { score, classification, reasons, risks };
+  return { score, rawScore, classification, reasons, risks, transactionQuality: tq };
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -318,6 +425,12 @@ function normalizeState(state: RadarCandidateState): RadarCandidateState {
     currentStatus: state.currentStatus ?? "live",
     currentStatusReason: state.currentStatusReason ?? null,
     sellsH1: state.sellsH1 ?? null,
+    transactionQualityScore: state.transactionQualityScore ?? null,
+    averageTradeUsdM5: state.averageTradeUsdM5 ?? null,
+    activityInflationRisk: state.activityInflationRisk ?? "unknown",
+    activityPenalty: state.activityPenalty ?? 0,
+    rawEarlyMomentumScore: state.rawEarlyMomentumScore ?? state.earlyMomentumScore ?? null,
+    transactionQualityDetail: state.transactionQualityDetail ?? null,
     coingeckoId: state.coingeckoId ?? null,
     coingeckoFirstSeenAt: state.coingeckoFirstSeenAt ?? null,
     coingeckoPreviouslyNotListed: state.coingeckoPreviouslyNotListed ?? false,
@@ -418,6 +531,12 @@ function materialize(stateRaw: RadarCandidateState, now = Date.now()): RadarCand
     isLive: currentStatus === "live",
     currentStatus,
     currentStatusReason: stale ? "Dados do Radar desatualizados" : state.currentStatusReason ?? null,
+    transactionQualityScore: state.transactionQualityScore ?? null,
+    averageTradeUsdM5: state.averageTradeUsdM5 ?? null,
+    activityInflationRisk: state.activityInflationRisk ?? "unknown",
+    activityPenalty: state.activityPenalty ?? 0,
+    rawEarlyMomentumScore: state.rawEarlyMomentumScore ?? state.earlyMomentumScore ?? null,
+    transactionQualityDetail: state.transactionQualityDetail ?? null,
     boosted: state.source !== "latest_profile",
     dexUrl: `https://dexscreener.com/${state.chain}/${state.pairAddress ?? state.address}`,
     visibleSource: cgKnown ? "coingecko" : "dexscreener",
@@ -539,6 +658,12 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
         sellsH1: num(pair.txns?.h1?.sells),
         priceChangeM5: num(pair.priceChange?.m5),
         priceChangeH1: num(pair.priceChange?.h1),
+        transactionQualityScore: scored.transactionQuality.score,
+        averageTradeUsdM5: scored.transactionQuality.averageTradeUsd,
+        activityInflationRisk: scored.transactionQuality.risk,
+        activityPenalty: scored.transactionQuality.penalty,
+        rawEarlyMomentumScore: scored.rawScore,
+        transactionQualityDetail: scored.transactionQuality.detail,
         source: seed.source,
         boostAmount: seed.boostAmount,
         earlyMomentumScore: scored.score,

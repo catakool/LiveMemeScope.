@@ -43,6 +43,24 @@ function SourceBadge({ c }: { c: RadarCandidate }) {
   return <span className="rounded-full border border-[var(--accent-info)]/45 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-info)]">Source: DexScreener</span>;
 }
 
+
+function TransactionQualityBadge({ c }: { c: RadarCandidate }) {
+  const risk = c.activityInflationRisk;
+  if (risk === "unknown") {
+    return <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--text-muted)]">Activity quality: N/D</span>;
+  }
+  if (risk === "critical") {
+    return <span className="rounded-full border border-[var(--accent-risk)]/55 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-risk)]">🤖 Activity: CRITICAL</span>;
+  }
+  if (risk === "high") {
+    return <span className="rounded-full border border-[var(--accent-risk)]/40 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-risk)]">⚠ Activity: LOW QUALITY</span>;
+  }
+  if (risk === "medium") {
+    return <span className="rounded-full border border-[var(--accent-gold)]/45 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-gold)]">Activity: MEDIUM</span>;
+  }
+  return <span className="rounded-full border border-[var(--accent-opportunity)]/40 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-opportunity)]">✓ Activity: HEALTHY</span>;
+}
+
 function Card({ c }: { c: RadarCandidate }) {
   const m = META[c.classification];
   const tx = (c.buysM5 ?? 0) + (c.sellsM5 ?? 0);
@@ -62,6 +80,7 @@ function Card({ c }: { c: RadarCandidate }) {
               <span className="rounded-full border border-[var(--text-faint)]/50 px-2 py-0.5 text-[10px] font-semibold text-[var(--text-muted)]">↘ Lost Momentum</span>
             )}
             <SourceBadge c={c} />
+            <TransactionQualityBadge c={c} />
             {c.isPreCoinGecko && <span className="rounded-full border border-[var(--accent-gold)]/45 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-gold)]">Pre-CoinGecko watch</span>}
           </div>
           <div className="mt-1 text-[10px] text-[var(--text-faint)]">
@@ -81,6 +100,34 @@ function Card({ c }: { c: RadarCandidate }) {
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">Liquidez</div><div className="font-data font-semibold">{formatUsd(c.liquidityUsd, { compact: true })}</div></div>
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">{c.marketCapIsFdv ? "FDV*" : "Market cap"}</div><div className="font-data font-semibold">{formatUsd(c.marketCapOrFdv, { compact: true })}</div></div>
       </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+        <div className="rounded-lg bg-[var(--surface-2)] p-2">
+          <div className="text-[var(--text-faint)]">Activity Quality</div>
+          <div className={`font-data font-semibold ${c.transactionQualityScore !== null && c.transactionQualityScore < 40 ? "text-[var(--accent-risk)]" : c.transactionQualityScore !== null && c.transactionQualityScore < 70 ? "text-[var(--accent-gold)]" : "text-[var(--accent-opportunity)]"}`}>
+            {c.transactionQualityScore === null ? "N/D" : `${c.transactionQualityScore.toFixed(0)}/100`}
+          </div>
+        </div>
+        <div className="rounded-lg bg-[var(--surface-2)] p-2">
+          <div className="text-[var(--text-faint)]">Vol. médio / tx 5m*</div>
+          <div className="font-data font-semibold">{c.averageTradeUsdM5 === null ? "N/D" : `$${c.averageTradeUsdM5 < 0.01 ? c.averageTradeUsdM5.toFixed(4) : c.averageTradeUsdM5.toFixed(2)}`}</div>
+        </div>
+        <div className="rounded-lg bg-[var(--surface-2)] p-2">
+          <div className="text-[var(--text-faint)]">Penalty atividade</div>
+          <div className={`font-data font-semibold ${c.activityPenalty > 0 ? "text-[var(--accent-risk)]" : "text-[var(--accent-opportunity)]"}`}>{c.activityPenalty > 0 ? `-${c.activityPenalty}` : "0"}</div>
+        </div>
+        <div className="rounded-lg bg-[var(--surface-2)] p-2">
+          <div className="text-[var(--text-faint)]">Score bruto → ajustado</div>
+          <div className="font-data font-semibold">{c.rawEarlyMomentumScore === null ? "N/D" : `${c.rawEarlyMomentumScore.toFixed(0)} → ${c.earlyMomentumScore.toFixed(0)}`}</div>
+        </div>
+      </div>
+
+      {c.transactionQualityDetail && (
+        <div className={`rounded-lg border p-2 text-[10px] ${c.activityInflationRisk === "critical" || c.activityInflationRisk === "high" ? "border-[var(--accent-risk)]/30 bg-[var(--accent-risk-dim)]/25 text-[var(--text-muted)]" : "border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]"}`}>
+          <b className="text-[var(--text)]">Transaction quality proxy:</b> {c.transactionQualityDetail}
+          <div className="mt-0.5 text-[var(--text-faint)]">* Estimativa agregada = volume 5m ÷ nº total de transações. A API pública da DexScreener não fornece o valor individual de cada trade; isto deteta inflação provável de atividade, não prova “compras falsas”.</div>
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[var(--text-muted)]">
         <span>Buys/Sells 5m: <b className="font-data text-[var(--text)]">{c.buysM5 ?? "N/D"}/{c.sellsM5 ?? "N/D"}</b></span>
@@ -173,7 +220,7 @@ export default function NewTokenRadar() {
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2"><span className="text-xl">🚀</span><h2 className="font-display text-lg font-semibold">New Token Radar</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] ${feed?.status === "live" ? "border-[var(--accent-opportunity)]/40 text-[var(--accent-opportunity)]" : "border-[var(--accent-risk)]/40 text-[var(--accent-risk)]"}`}>{feed?.status === "live" ? "LIVE" : "INDISPONÍVEL"}</span></div>
-          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> mostra apenas tokens que passam os gates agora. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato.</p>
+          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> mostra apenas tokens que passam os gates agora. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato. O score também penaliza atividade inflacionada quando há muitas transações para pouco volume real.</p>
         </div>
         <div className="grid grid-cols-4 gap-2 text-center shrink-0">
           <div className="rounded-lg bg-[var(--surface-2)] px-3 py-2"><div className="font-data font-bold text-[var(--accent-risk)]">{count("explosive")}</div><div className="text-[9px] text-[var(--text-faint)]">EXPLOSIVE</div></div>

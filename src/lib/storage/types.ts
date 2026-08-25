@@ -149,6 +149,17 @@ export interface RadarCandidateState {
   priceChangeM5: number | null;
   priceChangeH1: number | null;
 
+  /**
+   * Qualidade da atividade baseada APENAS em dados agregados da DexScreener.
+   * Não representa uma contagem exata de microtransações individuais.
+   */
+  transactionQualityScore?: number | null;
+  averageTradeUsdM5?: number | null;
+  activityInflationRisk?: "low" | "medium" | "high" | "critical" | "unknown";
+  activityPenalty?: number;
+  rawEarlyMomentumScore?: number | null;
+  transactionQualityDetail?: string | null;
+
   /** Como o token apareceu no feed da DexScreener. */
   source: "latest_profile" | "boosted" | "both";
   boostAmount: number | null;

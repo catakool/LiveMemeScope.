@@ -1,3 +1,17 @@
+# MemeScope v14 — Transaction Quality / Anti-Inflation
+
+## New Token Radar
+- Added `Activity Quality` (0–100) using only verifiable aggregate DexScreener data.
+- Added estimated average USD turnover per 5m transaction: `volumeM5 / (buysM5 + sellsM5)`.
+- Transaction-count and buy-ratio contributions are now discounted when activity quality is poor.
+- Added explicit activity penalty to Early Momentum.
+- Critical patterns (many transactions with extremely little real volume) can be excluded from Live Radar.
+- UI shows raw score → adjusted score, Activity Quality, average volume/transaction and penalty.
+- Warnings deliberately say `suspicious/inflated activity`, not `fake buys`, because aggregate DEX data cannot prove individual transactions are fake.
+
+## Important limitation
+DexScreener's public pair data used by MemeScope does not expose each trade's individual USD amount. Therefore this version **does not fabricate a count of `<$0.01` buys**. Exact microtransaction buckets would require a chain transaction provider/RPC and additional rate-limit handling.
+
 # MemeScope v13 — Radar Memory
 
 ## New Token Radar
