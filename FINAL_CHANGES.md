@@ -1,3 +1,12 @@
+# MemeScope v18 — Catalyst Intelligence
+
+- Catalyst Score 0–100 separado de Momentum, Continuation e Security.
+- Narrativa e evidências clicáveis.
+- Zero-cost por defeito via metadata/socials/websites/boosts/community takeovers da DexScreener.
+- NEWS_API_KEY opcional para notícias recentes; sem chave a app continua normalmente.
+- Reddit fica disabled nesta versão: não fazemos scraping frágil; fica preparado para integração autorizada futura.
+- Só os 8 candidatos live mais fortes são enriquecidos, com cache de 10 min.
+
 # MemeScope v17 — Trading Lab
 
 - Paper Trading automático de $10 em Breakout/Explosive que passem gates mínimos.
