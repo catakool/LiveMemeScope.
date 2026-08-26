@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0a0d13;
+  --surface: #11151e;
+  --surface-2: #171d29;
+  --border: #232a3a;
+  --text: #e9ecf1;
+  --text-muted: #8891a4;
+  --text-faint: #5c6478;
+
+  --accent-opportunity: #5eead4;
+  --accent-opportunity-dim: #1c3a38;
+  --accent-risk: #fb7185;
+  --accent-risk-dim: #3a1e26;
+  --accent-gold: #facc15;
+  --accent-info: #7dd3fc;
+
+  --tier-established: #7dd3fc;
+  --tier-momentum: #5eead4;
+  --tier-high-risk: #fbbf24;
+  --tier-extreme: #fb7185;
+
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-data: var(--font-data);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --font-display-family: var(--font-display);
+  --font-body-family: var(--font-body);
+  --font-data-family: var(--font-data);
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body), system-ui, sans-serif;
+}
+
+.font-display {
+  font-family: var(--font-display), system-ui, sans-serif;
+}
+
+.font-data {
+  font-family: var(--font-data), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Ticker tape scroll */
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.animate-ticker {
+  animation: ticker-scroll 38s linear infinite;
+}
+.animate-ticker:hover {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ticker {
+    animation: none;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--surface);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+.focus-ring:focus-visible {
+  outline: 2px solid var(--accent-opportunity);
+  outline-offset: 2px;
+}

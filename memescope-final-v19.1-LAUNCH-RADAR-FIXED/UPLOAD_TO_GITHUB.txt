@@ -1,0 +1,20 @@
+MEMESCOPE V11.1 — IMPORTANTE
+
+Sube LOS ARCHIVOS Y CARPETAS QUE ESTÁN JUNTO A ESTE TXT directamente a la raíz del repositorio.
+
+La raíz de GitHub debe verse así:
+src/
+public/
+package.json
+package-lock.json
+tsconfig.json
+vercel.json
+...
+
+NO debe verse así:
+memescope_final_v11/
+  src/
+  package.json
+  ...
+
+Si en GitHub existe una carpeta antigua llamada memescope_final_v11, elimínala del repositorio.
