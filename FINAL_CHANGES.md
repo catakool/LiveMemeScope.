@@ -1,3 +1,13 @@
+# MemeScope v17 — Trading Lab
+
+- Paper Trading automático de $10 em Breakout/Explosive que passem gates mínimos.
+- Regras experimentais: TP +20%, SL -15%, momentum expired, security critical e time exit 20m.
+- Resultados PAPER descontam 1,5% de fricção estimada de round-trip (slippage/fees) para serem menos otimistas.
+- Position/Exit Monitor para entradas reais marcadas com `💰 Marquei compra`; não executa vendas.
+- Estatísticas por setup A/B/C: n, win rate, mediana, média, profit factor e hold médio.
+- Nova aba `📈 Trading Lab`.
+- Cooldown de 6h por token para evitar duplicar artificialmente a amostra.
+
 # MemeScope v16 — Solana Security Engine
 
 - Integração server-side com **GoPlus Token Security API for Solana**.

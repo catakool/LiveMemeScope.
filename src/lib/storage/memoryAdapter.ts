@@ -3,6 +3,7 @@ import {
   LastClassificationState,
   MonitorHealth,
   RadarCandidateState,
+  TradingPosition,
   Snapshot,
   StorageAdapter,
   StoredSignal,
@@ -25,6 +26,7 @@ const signalsAll: StoredSignal[] = [];
 const lastClassification = new Map<string, LastClassificationState>();
 const currentStates = new Map<string, CurrentTokenState>();
 const radarCandidates = new Map<string, RadarCandidateState>();
+const tradingPositions = new Map<string, TradingPosition>();
 let monitorHealth: MonitorHealth | null = null;
 
 let warned = false;
@@ -146,6 +148,10 @@ export class MemoryStorageAdapter implements StorageAdapter {
   async setRadarCandidate(state: RadarCandidateState): Promise<void> { radarCandidates.set(state.tokenKey, state); }
   async getRadarCandidate(tokenKey: string): Promise<RadarCandidateState | null> { return radarCandidates.get(tokenKey) ?? null; }
   async listRadarCandidates(): Promise<RadarCandidateState[]> { return Array.from(radarCandidates.values()); }
+
+  async upsertTradingPosition(position: TradingPosition): Promise<void> { tradingPositions.set(position.id, position); }
+  async getTradingPosition(id: string): Promise<TradingPosition | null> { return tradingPositions.get(id) ?? null; }
+  async listTradingPositions(): Promise<TradingPosition[]> { return Array.from(tradingPositions.values()); }
 
   async setMonitorHealth(health: MonitorHealth): Promise<void> {
     monitorHealth = health;

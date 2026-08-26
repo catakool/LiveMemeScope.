@@ -243,6 +243,78 @@ export interface RadarCandidateState {
   coingeckoReturn24h: number | null;
 }
 
+
+export type TradingPositionMode = "paper" | "manual";
+export type TradingPositionStatus = "open" | "closed";
+export type ExitSignal = "hold" | "take_profit" | "stop_loss" | "momentum_expired" | "security_exit" | "time_exit" | "stale";
+export type SetupType = "A_CONTINUATION" | "B_MOMENTUM" | "C_SPECULATIVE";
+
+export interface TradingSetupSnapshot {
+  setupType: SetupType;
+  classification: "explosive" | "breakout" | "emerging" | "mature";
+  earlyMomentumScore: number;
+  continuationScore: number;
+  transactionQualityScore: number | null;
+  securityScore: number | null;
+  securityRisk: SecurityRiskLevel;
+  liquidityUsd: number | null;
+  marketCapOrFdv: number | null;
+  ageMinutes: number;
+  buyRatioM5: number | null;
+  priceChangeM5: number | null;
+  volumeM5: number | null;
+  visibleSource: "dexscreener" | "coingecko";
+}
+
+export interface TradingPosition {
+  id: string;
+  mode: TradingPositionMode;
+  status: TradingPositionStatus;
+  tokenKey: string;
+  chain: Chain;
+  address: string;
+  symbol: string;
+  name: string;
+  openedAt: string;
+  closedAt: string | null;
+  entryPrice: number;
+  currentPrice: number | null;
+  exitPrice: number | null;
+  notionalUsd: number;
+  quantityVirtual: number;
+  realizedReturnPct: number | null;
+  unrealizedReturnPct: number | null;
+  peakReturnPct: number | null;
+  maxDrawdownPct: number | null;
+  exitSignal: ExitSignal;
+  exitReason: string | null;
+  lastUpdatedAt: string;
+  setup: TradingSetupSnapshot;
+}
+
+export interface SetupPerformanceStats {
+  setupType: SetupType;
+  sampleSize: number;
+  winRatePct: number | null;
+  medianReturnPct: number | null;
+  averageReturnPct: number | null;
+  profitFactor: number | null;
+  averageHoldMinutes: number | null;
+}
+
+export interface TradingLabSummary {
+  generatedAt: string;
+  paperOpen: TradingPosition[];
+  paperClosed: TradingPosition[];
+  manualOpen: TradingPosition[];
+  manualClosed: TradingPosition[];
+  statsBySetup: SetupPerformanceStats[];
+  paperTotalRealizedUsd: number;
+  paperWinRatePct: number | null;
+  paperTradesClosed: number;
+  defaultPaperNotionalUsd: number;
+}
+
 /** Diagnóstico do job de monitorização, para o endpoint de health (Fase 17). */
 export interface MonitorHealth {
   lastRunAt: string; // ISO
@@ -284,6 +356,10 @@ export interface StorageAdapter {
   setRadarCandidate(state: RadarCandidateState, ttlSeconds?: number): Promise<void>;
   getRadarCandidate(tokenKey: string): Promise<RadarCandidateState | null>;
   listRadarCandidates(): Promise<RadarCandidateState[]>;
+
+  upsertTradingPosition(position: TradingPosition): Promise<void>;
+  getTradingPosition(id: string): Promise<TradingPosition | null>;
+  listTradingPositions(): Promise<TradingPosition[]>;
 
   setMonitorHealth(health: MonitorHealth): Promise<void>;
   getMonitorHealth(): Promise<MonitorHealth | null>;

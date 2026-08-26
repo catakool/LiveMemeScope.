@@ -100,6 +100,16 @@ function SecurityPanel({c}:{c:RadarCandidate}){
 
 function Card({ c }: { c: RadarCandidate }) {
   const m = META[c.classification];
+  const [tracking, setTracking] = useState(false);
+  const [tracked, setTracked] = useState(false);
+  const markBought = async () => {
+    if (tracking || tracked) return;
+    setTracking(true);
+    try {
+      const res = await fetch("/api/trading-lab", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "open_manual", candidate: c, notionalUsd: 10 }) });
+      if (res.ok) setTracked(true);
+    } finally { setTracking(false); }
+  };
   const tx = (c.buysM5 ?? 0) + (c.sellsM5 ?? 0);
   const buyRatio = tx > 0 ? (c.buysM5 ?? 0) / tx : null;
   return (
@@ -231,7 +241,7 @@ function Card({ c }: { c: RadarCandidate }) {
 
       <div className="flex items-center justify-between gap-2 pt-1">
         <code className="text-[9px] text-[var(--text-faint)] truncate max-w-[65%]" title={c.address}>{c.address}</code>
-        <div className="flex gap-1.5">{c.chain === "solana" && <a href={`https://solscan.io/token/${c.address}`} target="_blank" rel="noreferrer" className="text-xs rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[var(--text-muted)] hover:border-[var(--accent-info)]/60">Solscan ↗</a>}<a href={c.dexUrl} target="_blank" rel="noreferrer" className="text-xs rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[var(--accent-info)] hover:border-[var(--accent-info)]/60">DexScreener ↗</a></div>
+        <div className="flex flex-wrap justify-end gap-1.5"><button onClick={markBought} disabled={tracking || tracked} className="text-xs rounded-lg border border-[var(--accent-opportunity)]/35 px-2.5 py-1.5 text-[var(--accent-opportunity)] disabled:opacity-50">{tracked ? "✓ A monitorizar" : tracking ? "A guardar…" : "💰 Marquei compra"}</button>{c.chain === "solana" && <a href={`https://solscan.io/token/${c.address}`} target="_blank" rel="noreferrer" className="text-xs rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[var(--text-muted)] hover:border-[var(--accent-info)]/60">Solscan ↗</a>}<a href={c.dexUrl} target="_blank" rel="noreferrer" className="text-xs rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[var(--accent-info)] hover:border-[var(--accent-info)]/60">DexScreener ↗</a></div>
       </div>
     </article>
   );

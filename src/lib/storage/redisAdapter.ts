@@ -4,6 +4,7 @@ import {
   LastClassificationState,
   MonitorHealth,
   RadarCandidateState,
+  TradingPosition,
   Snapshot,
   StorageAdapter,
   StoredSignal,
@@ -28,6 +29,8 @@ const CURRENT_STATE_INDEX = "memescope:current-state:index"; // set com todas as
 const MONITOR_HEALTH_KEY = "memescope:monitor-health";
 const RADAR_PREFIX = "memescope:radar:candidate:";
 const RADAR_INDEX = "memescope:radar:index";
+const TRADING_POSITION_PREFIX = "memescope:trading:position:";
+const TRADING_POSITION_INDEX = "memescope:trading:positions:index";
 
 function getUrl(): string | undefined {
   return process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
@@ -222,6 +225,26 @@ export class RedisStorageAdapter implements StorageAdapter {
     const redis = getClient(); const keys = await redis.smembers(RADAR_INDEX); if (!keys?.length) return [];
     const vals = await Promise.all(keys.map((k) => this.getRadarCandidate(k))); const stale = keys.filter((_, i) => vals[i] === null);
     if (stale.length) await redis.srem(RADAR_INDEX, ...stale); return vals.filter((v): v is RadarCandidateState => v !== null);
+  }
+
+  async upsertTradingPosition(position: TradingPosition): Promise<void> {
+    const redis = getClient();
+    await redis.set(`${TRADING_POSITION_PREFIX}${position.id}`, position);
+    await redis.sadd(TRADING_POSITION_INDEX, position.id);
+  }
+
+  async getTradingPosition(id: string): Promise<TradingPosition | null> {
+    return (await getClient().get<TradingPosition>(`${TRADING_POSITION_PREFIX}${id}`)) ?? null;
+  }
+
+  async listTradingPositions(): Promise<TradingPosition[]> {
+    const redis = getClient();
+    const ids = await redis.smembers(TRADING_POSITION_INDEX);
+    if (!ids?.length) return [];
+    const values = await Promise.all(ids.map((id) => this.getTradingPosition(id)));
+    const stale = ids.filter((_, i) => values[i] === null);
+    if (stale.length) await redis.srem(TRADING_POSITION_INDEX, ...stale);
+    return values.filter((v): v is TradingPosition => v !== null);
   }
 
   async setMonitorHealth(health: MonitorHealth): Promise<void> {

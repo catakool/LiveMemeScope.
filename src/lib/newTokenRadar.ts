@@ -2,6 +2,7 @@ import { cacheGet, cacheSet, withCoalescing } from "./cache";
 import { resolveCoinGeckoByContract } from "./coingecko";
 import { Chain } from "./types";
 import { getStorage, RadarCandidateState, SecurityAssessment } from "./storage";
+import { syncTradingLab } from "./tradingLab";
 import { assessSolanaTokenSecurity } from "./securityEngine";
 
 const BASE = "https://api.dexscreener.com";
@@ -949,6 +950,9 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
       .filter((candidate) => now - new Date(candidate.firstDetectedAt).getTime() <= RECENT_DETECTION_WINDOW_MS)
       .sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime())
       .slice(0, 30);
+
+    try { await syncTradingLab(materializedAll, candidates); }
+    catch (error) { console.warn("[MemeScope][TradingLab] sync failed:", error instanceof Error ? error.message : String(error)); }
 
     return {
       candidates,
