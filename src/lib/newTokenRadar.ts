@@ -7,7 +7,7 @@ import { assessSolanaTokenSecurity } from "./securityEngine";
 import { assessCatalyst, CatalystAssessment } from "./catalystEngine";
 
 const BASE = "https://api.dexscreener.com";
-const CACHE_KEY = "new-token-radar:v5-launch";
+const CACHE_KEY = "new-token-radar:v6-launch-all";
 const CACHE_TTL_MS = 12_000;
 const RADAR_TTL_SECONDS = 8 * 24 * 60 * 60;
 const RECENT_DETECTION_WINDOW_MS = 48 * 60 * 60_000;
@@ -387,10 +387,69 @@ async function fetchJson<T>(url: string): Promise<T> {
   }
 }
 
+
+async function fetchText(url: string): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8_000);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        accept: "text/html,application/xhtml+xml",
+        "user-agent": "Mozilla/5.0 (compatible; MemeScopeLaunchRadar/1.0)",
+      },
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP_${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Pump.fun exposes a server-rendered "New" explore page. We only use it as
+ * an extra discovery source for mint addresses. A token is NEVER displayed
+ * from this page alone: it still has to resolve to a real DexScreener pair
+ * with pairCreatedAt through /tokens/v1/solana/{mint}.
+ *
+ * This helps the Launch Radar see very young Pump/PumpSwap tokens that have
+ * not yet reached DexScreener's latest-profile/boost feeds.
+ */
+async function fetchPumpFunNewestMints(): Promise<string[]> {
+  try {
+    const html = await fetchText(
+      "https://pump.fun/explore?coins_order=ASC&coins_sort=created_timestamp&show_animations=false"
+    );
+    const found = new Set<string>();
+    const patterns = [
+      /(?:\/coin\/|\/token\/)([1-9A-HJ-NP-Za-km-z]{32,44})/g,
+      /"mint"\s*:\s*"([1-9A-HJ-NP-Za-km-z]{32,44})"/g,
+      /\b([1-9A-HJ-NP-Za-km-z]{28,40}pump)\b/g,
+    ];
+    for (const pattern of patterns) {
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(html)) !== null) {
+        found.add(match[1]);
+        if (found.size >= 80) break;
+      }
+      if (found.size >= 80) break;
+    }
+    return [...found].slice(0, 80);
+  } catch (error) {
+    console.warn(
+      "[MemeScope][LaunchRadar] Pump.fun discovery unavailable:",
+      error instanceof Error ? error.message : String(error)
+    );
+    return [];
+  }
+}
+
 async function fetchSeeds() {
-  const [profilesRes, boostsRes] = await Promise.allSettled([
+  const [profilesRes, boostsRes, pumpNewestRes] = await Promise.allSettled([
     fetchJson<RawProfile[]>(`${BASE}/token-profiles/latest/v1`),
     fetchJson<RawBoost[]>(`${BASE}/token-boosts/latest/v1`),
+    fetchPumpFunNewestMints(),
   ]);
   const seeds = new Map<string, { chain: Chain; address: string; source: RadarSource; boostAmount: number | null }>();
 
@@ -417,6 +476,24 @@ async function fetchSeeds() {
       });
     }
   }
+
+  // Supplemental Solana launch discovery. These addresses are only candidates;
+  // fetchPairsForSeeds must still confirm a real DexScreener pair.
+  if (pumpNewestRes.status === "fulfilled") {
+    for (const address of pumpNewestRes.value ?? []) {
+      const key = keyOf("solana", address);
+      if (!seeds.has(key)) {
+        seeds.set(key, {
+          chain: "solana",
+          address,
+          // Keep the existing source enum stable; this is an unboosted discovery seed.
+          source: "latest_profile",
+          boostAmount: null,
+        });
+      }
+    }
+  }
+
   if (!seeds.size) throw new Error("DEX_DISCOVERY_FEEDS_UNAVAILABLE");
   return seeds;
 }
@@ -843,12 +920,10 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
 
       const scored = scorePair(pair, seed.source);
       const pairAgeMinutes = Math.max(0, (now - pair.pairCreatedAt) / 60_000);
-      const launchTx5 = (num(pair.txns?.m5?.buys) ?? 0) + (num(pair.txns?.m5?.sells) ?? 0);
-      const launchLiquidity = num(pair.liquidity?.usd) ?? 0;
-      const launchVolume = num(pair.volume?.m5) ?? 0;
-      // V19: during the first five minutes we deliberately do NOT wait for the old
-      // momentum gates. The point is to observe acceleration before confirmation.
-      const launchEligible = pairAgeMinutes <= 5 && launchLiquidity >= 3_000 && launchTx5 >= 2 && launchVolume >= 100;
+      // V19.2: during the first five minutes EVERY confirmed DexScreener pair is
+      // observable. Liquidity/volume/trades affect Launch Velocity and warnings,
+      // but they no longer decide whether a newborn token exists on screen.
+      const launchEligible = pairAgeMinutes <= 5;
       const qualifiesNow = Boolean(scored.classification) || launchEligible;
       if (!qualifiesNow && !prior) { rejected++; continue; }
       if (!qualifiesNow) rejected++;
@@ -981,7 +1056,7 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
       rejectedTokens: rejected,
       listingEffect: listingEffectStats(allStored),
       continuation: contStats,
-      note: "Descoberta primária via DexScreener; CoinGecko é verificada depois por contrato. Continuation Score é experimental e mede qualidade de continuação. Security Engine usa GoPlus + Solscan em Solana e um risco crítico pode bloquear o Live Radar. Máximo de 4 verificações CoinGecko e 2 security checks por ciclo para respeitar rate limits.",
+      note: "Launch Radar v19.2: todos os pares Solana confirmados pela DexScreener com <=5 min são mostrados, mesmo com volume/liquidez quase zero. Discovery combina feeds DexScreener com os mints mais recentes de Pump.fun e só aceita um mint quando DexScreener confirma o par/pairCreatedAt. Scores servem para ordenar e alertar, não para esconder lançamentos.",
     };
   } catch (err) {
     console.error("[MemeScope][Radar] refresh failed:", err instanceof Error ? err.message : String(err));

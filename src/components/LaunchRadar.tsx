@@ -40,9 +40,17 @@ function bucket(c: RadarCandidate) {
 function tone(v: number) {
   return v >= 75 ? "text-[var(--accent-opportunity)]" : v >= 55 ? "text-[var(--accent-gold)]" : "text-[var(--text-muted)]";
 }
+function launchStage(c: RadarCandidate, velocity: number) {
+  if (c.securityAssessment?.critical || c.activityInflationRisk === "critical") return { label: "🔴 DANGER", cls: "text-[var(--accent-risk)] border-[var(--accent-risk)]/45" };
+  if (velocity >= 75) return { label: "🔥 LAUNCHING", cls: "text-[var(--accent-opportunity)] border-[var(--accent-opportunity)]/45" };
+  if (velocity >= 55) return { label: "🟢 ACCELERATING", cls: "text-[var(--accent-opportunity)] border-[var(--accent-opportunity)]/35" };
+  if (((c.buysM5 ?? 0) + (c.sellsM5 ?? 0)) > 0 || (c.volumeM5 ?? 0) > 0) return { label: "🟡 WARMING UP", cls: "text-[var(--accent-gold)] border-[var(--accent-gold)]/35" };
+  return { label: "⚪ NEW", cls: "text-[var(--text-muted)] border-[var(--border)]" };
+}
 
 function LaunchCard({ c }: { c: RadarCandidate }) {
   const velocity = launchVelocity(c);
+  const stage = launchStage(c, velocity);
   const br = buyRatio(c);
   const tx = (c.buysM5 ?? 0) + (c.sellsM5 ?? 0);
   const [tracked, setTracked] = useState(false);
@@ -55,7 +63,7 @@ function LaunchCard({ c }: { c: RadarCandidate }) {
   return <article className={`rounded-xl border bg-[var(--surface)] p-4 space-y-3 ${danger ? "border-[var(--accent-risk)]/60" : "border-[var(--border)]"}`}>
     <div className="flex justify-between gap-3">
       <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2"><span className="rounded-full border border-[var(--accent-info)]/40 px-2 py-0.5 text-[10px] text-[var(--accent-info)]">🐣 {bucket(c)}</span><b className="truncate">{c.name}</b><span className="text-xs text-[var(--text-muted)]">${c.symbol}</span></div>
+        <div className="flex flex-wrap items-center gap-2"><span className="rounded-full border border-[var(--accent-info)]/40 px-2 py-0.5 text-[10px] text-[var(--accent-info)]">🐣 {bucket(c)}</span><span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${stage.cls}`}>{stage.label}</span><b className="truncate">{c.name}</b><span className="text-xs text-[var(--text-muted)]">${c.symbol}</span></div>
         <div className="mt-1 text-[11px] text-[var(--text-faint)]">Listado hace <b className="text-[var(--text)]">{age(c)}</b> · detectado hace {Math.max(0, Math.round(c.detectedMinutesAgo * 60))}s</div>
       </div>
       <div className="text-right shrink-0"><div className={`font-data text-2xl font-bold ${tone(velocity)}`}>{velocity}</div><div className="text-[9px] text-[var(--text-faint)]">LAUNCH VELOCITY</div></div>
@@ -98,10 +106,10 @@ export default function LaunchRadar() {
   const groups = [["🐣 JUST LISTED · <1 MIN", launch.filter(c => c.ageMinutes < 1)], ["⚡ 1–2 MIN", launch.filter(c => c.ageMinutes >= 1 && c.ageMinutes < 2)], ["🔥 2–5 MIN", launch.filter(c => c.ageMinutes >= 2)]] as const;
   return <section className="space-y-5">
     <div className="rounded-2xl border border-[var(--accent-info)]/35 bg-[var(--surface)] p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-display text-xl font-semibold">⚡ Launch Radar</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Solo Solana · primeros 5 minutos. Aquí no esperamos a que el momentum esté “confirmado”. Buscamos aceleración antes del pico.</p></div><div className="font-data text-sm"><b>{launch.length}</b> &lt;5m</div></div>
-      <div className="mt-3 rounded-lg bg-[var(--surface-2)] p-2 text-[10px] text-[var(--text-muted)]">Actualiza cada 15s. Launch Velocity es experimental: prioriza trades/min, volumen/min, presión compradora y liquidez. Security sigue actuando como freno, no como señal de compra.</div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-display text-xl font-semibold">⚡ Launch Radar</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Solo Solana · primeros 5 minutos. Ya no escondemos un lanzamiento por tener poco volumen o liquidez: primero lo ves, después decides si está despertando.</p></div><div className="text-right text-xs text-[var(--text-muted)]"><div className="font-data text-sm"><b>{launch.length}</b> pares &lt;5m</div><div>escaneados: <b>{feed?.scannedTokens ?? 0}</b></div></div></div>
+      <div className="mt-3 rounded-lg bg-[var(--surface-2)] p-2 text-[10px] text-[var(--text-muted)]">⚪ NEW → 🟡 WARMING UP → 🟢 ACCELERATING → 🔥 LAUNCHING. Launch Velocity ordena y describe; ya no elimina tokens recién nacidos. Riesgos críticos se marcan como 🔴 DANGER.</div>
     </div>
-    {loading && !feed ? <div className="text-sm text-[var(--text-muted)]">Buscando lanzamientos…</div> : groups.map(([title, list]) => <div key={title} className="space-y-2"><div className="flex justify-between"><h3 className="font-display text-sm font-semibold">{title}</h3><span className="text-xs text-[var(--text-muted)]">{list.length}</span></div>{list.length ? <div className="grid lg:grid-cols-2 gap-3">{list.map(c => <LaunchCard key={c.tokenKey} c={c} />)}</div> : <div className="rounded-xl border border-dashed border-[var(--border)] p-4 text-xs text-[var(--text-muted)]">Nada nuevo en esta ventana ahora mismo. Esto es normal; no rellenamos la pantalla con monedas viejas.</div>}</div>)}
-    <div className="text-[10px] text-[var(--text-faint)]">Importante: DexScreener no ofrece en su API pública un stream garantizado de absolutamente todos los pares nuevos. MemeScope muestra los lanzamientos que descubre mediante sus feeds públicos; por eso puede haber lanzamientos que no aparezcan.</div>
+    {loading && !feed ? <div className="text-sm text-[var(--text-muted)]">Buscando lanzamientos…</div> : groups.map(([title, list]) => <div key={title} className="space-y-2"><div className="flex justify-between"><h3 className="font-display text-sm font-semibold">{title}</h3><span className="text-xs text-[var(--text-muted)]">{list.length}</span></div>{list.length ? <div className="grid lg:grid-cols-2 gap-3">{list.map(c => <LaunchCard key={c.tokenKey} c={c} />)}</div> : <div className="rounded-xl border border-dashed border-[var(--border)] p-4 text-xs text-[var(--text-muted)]">No hay ningún par confirmado por DexScreener en esta franja de edad ahora mismo. No es un filtro de volumen/liquidez: si existe un par ≤5m que nuestros feeds descubren, debería aparecer aquí.</div>}</div>)}
+    <div className="text-[10px] text-[var(--text-faint)]">Discovery: DexScreener latest profiles/boosts + mints recientes de Pump.fun como fuente suplementaria. Un mint de Pump.fun solo aparece cuando DexScreener confirma que ya existe un par. Aun así, la API pública de DexScreener no garantiza un stream completo de todos los pares de Solana.</div>
   </section>;
 }
