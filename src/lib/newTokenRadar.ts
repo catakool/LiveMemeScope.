@@ -496,7 +496,6 @@ function normalizeState(state: RadarCandidateState): RadarCandidateState {
     continuationMfe60m: state.continuationMfe60m ?? null,
     continuationMae60m: state.continuationMae60m ?? null,
     securityAssessment: state.securityAssessment ?? null,
-    catalystAssessment: null,
     nextSecurityCheckAt: state.nextSecurityCheckAt ?? null,
     coingeckoId: state.coingeckoId ?? null,
     coingeckoFirstSeenAt: state.coingeckoFirstSeenAt ?? null,
@@ -765,6 +764,7 @@ function materialize(
 ): RadarCandidate {
   const state = normalizeState(stateRaw);
   const continuation = continuationHeuristic(state, empirical5m);
+  const entry = entryQualityHeuristic(state, continuation.score);
   const cgKnown = Boolean(state.coingeckoId);
   const cgCheckedNotListed = state.coingeckoPreviouslyNotListed && !cgKnown;
   const lastSeenMs = new Date(state.lastSeenAt).getTime();
@@ -804,6 +804,7 @@ function materialize(
     continuationMfe60m: state.continuationMfe60m ?? null,
     continuationMae60m: state.continuationMae60m ?? null,
     securityAssessment: state.securityAssessment ?? null,
+    catalystAssessment: null,
     boosted: state.source !== "latest_profile",
     dexUrl: `https://dexscreener.com/${state.chain}/${state.pairAddress ?? state.address}`,
     visibleSource: cgKnown ? "coingecko" : "dexscreener",
