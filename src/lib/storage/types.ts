@@ -215,6 +215,9 @@ export interface RadarCandidateState {
   securityAssessment?: SecurityAssessment | null;
   nextSecurityCheckAt?: string | null;
 
+  /** Catalyst é calculado em runtime e não precisa ser persistido integralmente. */
+  catalystAssessment?: unknown | null;
+
   /** Como o token apareceu no feed da DexScreener. */
   source: "latest_profile" | "boosted" | "both";
   boostAmount: number | null;

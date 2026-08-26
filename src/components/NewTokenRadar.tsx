@@ -14,7 +14,7 @@ import { CHAIN_LABEL } from "@/lib/tiers";
 
 type RadarFilter = "all" | RadarClassification;
 type SourceFilter = "all" | VisibleRadarSource | "pre_coingecko";
-type SortMode = "entry" | "score" | "newest" | "momentum" | "liquidity";
+type SortMode = "score" | "newest" | "momentum" | "liquidity";
 
 const META: Record<RadarClassification, { label: string; icon: string; cls: string }> = {
   explosive: { label: "Explosive", icon: "🚨", cls: "text-[var(--accent-risk)] border-[var(--accent-risk)]/50" },
@@ -62,12 +62,6 @@ function TransactionQualityBadge({ c }: { c: RadarCandidate }) {
   return <span className="rounded-full border border-[var(--accent-opportunity)]/40 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-opportunity)]">✓ Activity: HEALTHY</span>;
 }
 
-
-function EntryQualityBadge({ c }: { c: RadarCandidate }) {
-  const cls = c.entryQuality === "prime" ? "border-[var(--accent-opportunity)]/55 text-[var(--accent-opportunity)]" : c.entryQuality === "watch" ? "border-[var(--accent-gold)]/55 text-[var(--accent-gold)]" : "border-[var(--accent-risk)]/50 text-[var(--accent-risk)]";
-  const label = c.entryQuality === "prime" ? "PRIME" : c.entryQuality === "watch" ? "WATCH" : "AVOID";
-  return <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${cls}`}>🎯 Entry {c.entryQualityScore.toFixed(0)} · {label}</span>;
-}
 
 function ContinuationBadge({ c }: { c: RadarCandidate }) {
   const cls =
@@ -147,7 +141,6 @@ function Card({ c }: { c: RadarCandidate }) {
             )}
             <SourceBadge c={c} />
             <TransactionQualityBadge c={c} />
-            <EntryQualityBadge c={c} />
             <ContinuationBadge c={c} />
             <SecurityBadge c={c} />
             {c.isPreCoinGecko && <span className="rounded-full border border-[var(--accent-gold)]/45 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-gold)]">Pre-CoinGecko watch</span>}
@@ -161,11 +154,6 @@ function Card({ c }: { c: RadarCandidate }) {
           <div className="font-data text-xl font-bold">{c.earlyMomentumScore.toFixed(0)}</div>
           <div className="text-[9px] uppercase tracking-wider text-[var(--text-faint)]">{c.currentStatus === "live" ? "Early Momentum" : "Score atual"}</div>
         </div>
-      </div>
-
-      <div className={`rounded-lg border p-3 ${c.entryQuality === "prime" ? "border-[var(--accent-opportunity)]/35" : c.entryQuality === "watch" ? "border-[var(--accent-gold)]/35" : "border-[var(--accent-risk)]/35"}`}>
-        <div className="flex items-center justify-between gap-2"><div><div className="text-[10px] uppercase tracking-wider">🎯 Entry Quality · v19</div><div className="text-[10px] text-[var(--text-faint)]">Prioriza qualidade de entrada; penaliza pumps verticais, pouca liquidez e euforia.</div></div><div className="font-data text-lg font-bold">{c.entryQualityScore.toFixed(0)}/100</div></div>
-        {!!c.entryQualityReasons.length && <div className="mt-1 text-[10px] text-[var(--text-muted)]">{c.entryQualityReasons.join(" · ")}</div>}
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
@@ -295,7 +283,7 @@ export default function NewTokenRadar() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<RadarFilter>("all");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
-  const [sort, setSort] = useState<SortMode>("entry");
+  const [sort, setSort] = useState<SortMode>("score");
 
   useEffect(() => {
     let cancelled = false;
@@ -320,8 +308,7 @@ export default function NewTokenRadar() {
     if (sort === "newest") list.sort((a, b) => a.ageMinutes - b.ageMinutes);
     else if (sort === "momentum") list.sort((a, b) => (b.priceChangeM5 ?? -Infinity) - (a.priceChangeM5 ?? -Infinity));
     else if (sort === "liquidity") list.sort((a, b) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0));
-    else if (sort === "score") list.sort((a, b) => b.earlyMomentumScore - a.earlyMomentumScore);
-    else list.sort((a, b) => b.entryQualityScore - a.entryQualityScore || b.continuationScore - a.continuationScore);
+    else list.sort((a, b) => b.earlyMomentumScore - a.earlyMomentumScore);
     return list;
   }, [feed, filter, sourceFilter, sort]);
 
@@ -339,7 +326,7 @@ export default function NewTokenRadar() {
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2"><span className="text-xl">🚀</span><h2 className="font-display text-lg font-semibold">New Token Radar</h2><span className={`rounded-full border px-2 py-0.5 text-[10px] ${feed?.status === "live" ? "border-[var(--accent-opportunity)]/40 text-[var(--accent-opportunity)]" : "border-[var(--accent-risk)]/40 text-[var(--accent-risk)]"}`}>{feed?.status === "live" ? "LIVE" : "INDISPONÍVEL"}</span></div>
-          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> v19 usa gates mais conservadores e ordena por <b>Entry Quality</b>, não por pump bruto. O <b>Continuation Score</b> tenta separar “está a subir” de “tem condições para continuar alguns minutos”. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato. O score também penaliza atividade inflacionada. Em Solana, o Security Engine cruza GoPlus + Solscan e pode retirar um token do Live Radar quando encontra um blocker crítico.</p>
+          <p className="mt-2 max-w-3xl text-xs text-[var(--text-muted)]">O <b>Live Radar</b> mostra apenas tokens que passam os gates agora. O <b>Continuation Score</b> tenta separar “está a subir” de “tem condições para continuar alguns minutos”. Quando deixam de passar, não desaparecem: ficam em <b>Detetados recentemente</b>, com retorno e pico desde a primeira deteção. DexScreener faz a descoberta precoce e CoinGecko é verificada depois por contrato. O score também penaliza atividade inflacionada. Em Solana, o Security Engine cruza GoPlus + Solscan e pode retirar um token do Live Radar quando encontra um blocker crítico.</p>
         </div>
         <div className="grid grid-cols-4 gap-2 text-center shrink-0">
           <div className="rounded-lg bg-[var(--surface-2)] px-3 py-2"><div className="font-data font-bold text-[var(--accent-risk)]">{count("explosive")}</div><div className="text-[9px] text-[var(--text-faint)]">EXPLOSIVE</div></div>
@@ -396,7 +383,7 @@ export default function NewTokenRadar() {
 
     <div className="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between">
       <div className="flex flex-wrap gap-1">{(["all", "explosive", "breakout", "emerging", "mature"] as RadarFilter[]).map((f) => <button key={f} onClick={() => setFilter(f)} className={`rounded-lg border px-3 py-1.5 text-xs ${filter === f ? "border-[var(--accent-info)] text-[var(--accent-info)]" : "border-[var(--border)] text-[var(--text-muted)]"}`}>{f === "all" ? "Todos" : META[f].label}</button>)}</div>
-      <select value={sort} onChange={(e) => setSort(e.target.value as SortMode)} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs text-[var(--text-muted)]"><option value="entry">Entry Quality</option><option value="score">Maior Early Momentum</option><option value="newest">Mais novo</option><option value="momentum">Maior subida 5m</option><option value="liquidity">Maior liquidez</option></select>
+      <select value={sort} onChange={(e) => setSort(e.target.value as SortMode)} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs text-[var(--text-muted)]"><option value="score">Maior Early Momentum</option><option value="newest">Mais novo</option><option value="momentum">Maior subida 5m</option><option value="liquidity">Maior liquidez</option></select>
     </div>
 
     {loading && <div className="text-sm text-[var(--text-muted)]">A procurar novos pares e a verificar CoinGecko…</div>}

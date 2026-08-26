@@ -7,8 +7,8 @@ import { assessSolanaTokenSecurity } from "./securityEngine";
 import { assessCatalyst, CatalystAssessment } from "./catalystEngine";
 
 const BASE = "https://api.dexscreener.com";
-const CACHE_KEY = "new-token-radar:v4";
-const CACHE_TTL_MS = 45_000;
+const CACHE_KEY = "new-token-radar:v5-launch";
+const CACHE_TTL_MS = 12_000;
 const RADAR_TTL_SECONDS = 8 * 24 * 60 * 60;
 const RECENT_DETECTION_WINDOW_MS = 48 * 60 * 60_000;
 const RADAR_STALE_AFTER_MS = 15 * 60_000;
@@ -130,10 +130,6 @@ export interface RadarCandidate {
   rawEarlyMomentumScore: number | null;
   transactionQualityDetail: string | null;
 
-  /** Entry Quality prioritises tradable entries over raw pump intensity. */
-  entryQualityScore: number;
-  entryQuality: "prime" | "watch" | "avoid";
-  entryQualityReasons: string[];
   continuationScore: number;
   continuationConfidence: "low" | "medium" | "high";
   continuationReasons: string[];
@@ -294,8 +290,8 @@ function scorePair(
   if (ageMin > MAX_PAIR_AGE_MINUTES) {
     return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Par fora da janela de 7 dias do Radar"], transactionQuality: tq };
   }
-  if (liquidity === null || liquidity < 20_000) {
-    return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Entry Gate: liquidez inferior a $20k"], transactionQuality: tq };
+  if (liquidity === null || liquidity < 10_000) {
+    return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Liquidez inferior a $10k"], transactionQuality: tq };
   }
 
   // Depois de 6h o token pode entrar em DEX Mature mesmo sem estar a explodir
@@ -308,8 +304,8 @@ function scorePair(
 
   // Para descoberta realmente precoce mantemos gates mais fortes de 5m.
   if (!matureEligible) {
-    if (tx5 < 15) return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Entry Gate: poucas transações nos últimos 5m"], transactionQuality: tq };
-    if (v5 === null || v5 < 2_000) return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Entry Gate: volume 5m insuficiente"], transactionQuality: tq };
+    if (tx5 < 10) return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Poucas transações nos últimos 5m"], transactionQuality: tq };
+    if (v5 === null || v5 < 1_500) return { score: 0, rawScore: 0, classification: null, reasons, risks: ["Volume 5m insuficiente"], transactionQuality: tq };
   }
 
   let score = 0;
@@ -365,12 +361,9 @@ function scorePair(
 
   let classification: RadarClassification | null = null;
   if (!tq.hardReject) {
-    // v19: do not reward a vertical candle as an entry. Very extended moves stay observable
-    // only through recent detections instead of being promoted as fresh live entries.
-    const entryPc5 = pc5 ?? 0;
-    if (score >= 85 && liquidity >= 40_000 && tx5 >= 35 && entryPc5 >= 8 && entryPc5 <= 45 && tq.risk === "low") classification = "explosive";
-    else if (score >= 72 && liquidity >= 30_000 && tx5 >= 25 && entryPc5 >= 4 && entryPc5 <= 35 && tq.risk !== "high" && tq.risk !== "critical") classification = "breakout";
-    else if (score >= 65 && liquidity >= 25_000 && tx5 >= 20 && entryPc5 >= 2 && entryPc5 <= 25 && tq.risk !== "high" && tq.risk !== "critical") classification = "emerging";
+    if (score >= 85 && liquidity >= 25_000 && tx5 >= 30 && (pc5 ?? 0) >= 8 && tq.risk !== "high" && tq.risk !== "critical") classification = "explosive";
+    else if (score >= 70 && liquidity >= 15_000 && tx5 >= 20 && (pc5 ?? 0) >= 4 && tq.risk !== "critical") classification = "breakout";
+    else if (score >= 55 && (pc5 ?? 0) > 0) classification = "emerging";
     else if (matureEligible && tq.risk !== "critical") {
       classification = "mature";
       reasons.push("DEX Mature: atividade e liquidez sustentadas apesar de já não estar na fase inicial");
@@ -496,6 +489,7 @@ function normalizeState(state: RadarCandidateState): RadarCandidateState {
     continuationMfe60m: state.continuationMfe60m ?? null,
     continuationMae60m: state.continuationMae60m ?? null,
     securityAssessment: state.securityAssessment ?? null,
+    catalystAssessment: null,
     nextSecurityCheckAt: state.nextSecurityCheckAt ?? null,
     coingeckoId: state.coingeckoId ?? null,
     coingeckoFirstSeenAt: state.coingeckoFirstSeenAt ?? null,
@@ -716,47 +710,6 @@ async function enrichSecurity(states: RadarCandidateState[], now: number): Promi
   });
 }
 
-function entryQualityHeuristic(state: RadarCandidateState, continuationScore: number): { score: number; quality: "prime" | "watch" | "avoid"; reasons: string[] } {
-  const reasons: string[] = [];
-  const liquidity = state.liquidityUsd ?? 0;
-  const quality = state.transactionQualityScore ?? 45;
-  const tx = (state.buysM5 ?? 0) + (state.sellsM5 ?? 0);
-  const buyRatio = tx > 0 ? (state.buysM5 ?? 0) / tx : 0.5;
-  const pc5 = state.priceChangeM5 ?? 0;
-  const ageMin = Math.max(0, (Date.now() - new Date(state.pairCreatedAt).getTime()) / 60_000);
-
-  let score = 0;
-  score += clamp(((Math.log10(Math.max(liquidity, 1)) - Math.log10(20_000)) / 0.7) * 100) * 0.24;
-  score += clamp(quality) * 0.24;
-  score += clamp(((buyRatio - 0.48) / 0.22) * 100) * 0.16;
-  score += clamp(continuationScore) * 0.16;
-
-  // Sweet spot: positive momentum, but not a vertical candle that invites chasing.
-  let momentumEntry = 0;
-  if (pc5 >= 3 && pc5 <= 18) { momentumEntry = 100; reasons.push("momentum 5m em zona de entrada, sem extensão extrema"); }
-  else if (pc5 > 18 && pc5 <= 30) { momentumEntry = 68; reasons.push("momentum forte, já parcialmente esticado"); }
-  else if (pc5 > 30 && pc5 <= 45) { momentumEntry = 30; reasons.push("entrada tardia: movimento 5m esticado"); }
-  else if (pc5 > 45) { momentumEntry = 0; reasons.push("evitar chase: movimento 5m demasiado vertical"); }
-  else if (pc5 > 0) { momentumEntry = 45; reasons.push("momentum positivo ainda fraco"); }
-  score += momentumEntry * 0.20;
-
-  if (liquidity >= 50_000) reasons.push("liquidez acima de $50k");
-  else if (liquidity < 30_000) { score -= 10; reasons.push("liquidez ainda limitada"); }
-  if (quality >= 80) reasons.push("transaction quality forte");
-  if (buyRatio >= 0.58 && buyRatio <= 0.78 && tx >= 25) reasons.push("pressão compradora saudável");
-  if (buyRatio > 0.85) { score -= 8; reasons.push("buy ratio extremo: risco de euforia"); }
-  if (ageMin < 8) { score -= 8; reasons.push("par demasiado recente para entrada conservadora"); }
-  if (state.source !== "latest_profile") score -= 3;
-  if (state.activityInflationRisk === "high") score -= 20;
-  if (state.activityInflationRisk === "critical") score -= 40;
-  if (state.securityAssessment?.risk === "high") { score -= 20; reasons.push("security risk HIGH"); }
-  if (state.securityAssessment?.critical) { score = 0; reasons.push("security blocker crítico"); }
-
-  score = Math.round(clamp(score) * 10) / 10;
-  const tier = score >= 75 ? "prime" : score >= 58 ? "watch" : "avoid";
-  return { score, quality: tier, reasons: reasons.slice(0, 5) };
-}
-
 function materialize(
   stateRaw: RadarCandidateState,
   now = Date.now(),
@@ -764,7 +717,6 @@ function materialize(
 ): RadarCandidate {
   const state = normalizeState(stateRaw);
   const continuation = continuationHeuristic(state, empirical5m);
-  const entry = entryQualityHeuristic(state, continuation.score);
   const cgKnown = Boolean(state.coingeckoId);
   const cgCheckedNotListed = state.coingeckoPreviouslyNotListed && !cgKnown;
   const lastSeenMs = new Date(state.lastSeenAt).getTime();
@@ -788,9 +740,6 @@ function materialize(
     activityPenalty: state.activityPenalty ?? 0,
     rawEarlyMomentumScore: state.rawEarlyMomentumScore ?? state.earlyMomentumScore ?? null,
     transactionQualityDetail: state.transactionQualityDetail ?? null,
-    entryQualityScore: entry.score,
-    entryQuality: entry.quality,
-    entryQualityReasons: entry.reasons,
     continuationScore: continuation.score,
     continuationConfidence: continuation.confidence,
     continuationReasons: continuation.reasons,
@@ -893,7 +842,14 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
       if (!pair?.pairCreatedAt) { rejected++; continue; }
 
       const scored = scorePair(pair, seed.source);
-      const qualifiesNow = Boolean(scored.classification);
+      const pairAgeMinutes = Math.max(0, (now - pair.pairCreatedAt) / 60_000);
+      const launchTx5 = (num(pair.txns?.m5?.buys) ?? 0) + (num(pair.txns?.m5?.sells) ?? 0);
+      const launchLiquidity = num(pair.liquidity?.usd) ?? 0;
+      const launchVolume = num(pair.volume?.m5) ?? 0;
+      // V19: during the first five minutes we deliberately do NOT wait for the old
+      // momentum gates. The point is to observe acceleration before confirmation.
+      const launchEligible = pairAgeMinutes <= 5 && launchLiquidity >= 3_000 && launchTx5 >= 2 && launchVolume >= 100;
+      const qualifiesNow = Boolean(scored.classification) || launchEligible;
       if (!qualifiesNow && !prior) { rejected++; continue; }
       if (!qualifiesNow) rejected++;
 
@@ -906,7 +862,7 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
       const priorPeak = prior?.peakPriceSinceDetected ?? prior?.price ?? prior?.firstDetectedPrice ?? null;
       const peakPrice = price !== null && (priorPeak === null || price > priorPeak) ? price : priorPeak;
       const peakReturn = returnFrom(firstDetectedPrice, peakPrice);
-      const classification = scored.classification ?? prior?.classification;
+      const classification = scored.classification ?? (launchEligible ? "emerging" : prior?.classification);
       if (!classification) continue;
 
       const rejectionReason = !qualifiesNow
@@ -973,7 +929,7 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
         isLive: qualifiesNow,
         currentStatus: qualifiesNow ? "live" : "lost_momentum",
         currentStatusReason: rejectionReason,
-        reasons: qualifiesNow ? scored.reasons : prior?.reasons ?? scored.reasons,
+        reasons: qualifiesNow ? (launchEligible && !scored.classification ? ["V19 Launch Radar: par <5 min observado antes da confirmação de momentum", ...scored.reasons] : scored.reasons) : prior?.reasons ?? scored.reasons,
         risks: qualifiesNow ? scored.risks : Array.from(new Set([...(prior?.risks ?? []), ...scored.risks])).slice(0, 5),
         coingeckoId: prior?.coingeckoId ?? null,
         coingeckoFirstSeenAt: prior?.coingeckoFirstSeenAt ?? null,
@@ -998,7 +954,7 @@ export async function refreshNewTokenRadar(): Promise<RadarFeed> {
     const materializedAll = allStored.map((state) => materialize(state, now, contStats.return5m));
     const candidates = materializedAll
       .filter((candidate) => candidate.currentStatus === "live")
-      .sort((a, b) => b.entryQualityScore - a.entryQualityScore || b.continuationScore - a.continuationScore || a.ageMinutes - b.ageMinutes);
+      .sort((a, b) => b.earlyMomentumScore - a.earlyMomentumScore || a.ageMinutes - b.ageMinutes);
     const liveKeys = new Set(candidates.map((candidate) => candidate.tokenKey));
     const recentCandidates = materializedAll
       .filter((candidate) => !liveKeys.has(candidate.tokenKey))
