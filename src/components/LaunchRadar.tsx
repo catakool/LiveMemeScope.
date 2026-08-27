@@ -139,6 +139,18 @@ const MIN_DISTINCT_PRICE_LEVELS = 2;
 const MIN_OBSERVED_SPAN_MS = 1_500;
 const PRICE_DISTINCT_EPSILON_PCT = 0.05;
 
+// REAL waits for a tiny amount of confirmed post-launch momentum, but enters
+// earlier than V25 so it does not systematically arrive after the first impulse.
+// These values are deliberately conservative enough to reject a token that has
+// already gone vertical before our transaction can land.
+const REAL_ENTRY_MIN_AGE_MS = 1_500;
+const REAL_ENTRY_MAX_AGE_MS = 12_000;
+const REAL_ENTRY_MIN_RETURN_PCT = 0.6;
+const REAL_ENTRY_MAX_RETURN_PCT = 18;
+const REAL_ENTRY_MIN_RECENT_MOVE_PCT = 0.6;
+const REAL_ENTRY_MIN_BUY_RATIO = 0.60;
+const REAL_ENTRY_MAX_DRAWDOWN_PCT = -2.5;
+
 function ret(entry: number, current: number) {
   return entry > 0 ? ((current / entry) - 1) * 100 : 0;
 }
@@ -252,12 +264,15 @@ export default function LaunchRadar() {
   const [realStatus, setRealStatus] = useState<any>(null);
   const [realBusy, setRealBusy] = useState(false);
   const [realError, setRealError] = useState<string | null>(null);
+  const [realMirror, setRealMirror] = useState<PaperSniperPosition | null>(null);
   const realArmedRef = useRef(false);
   const realBusyRef = useRef(false);
   const realTokenRef = useRef("");
   const realOpenMintRef = useRef<string | null>(null);
   const realExitPendingRef = useRef(false);
   const realExitReasonRef = useRef("autonomous_recovery");
+  const realExitMarketCapRef = useRef<number | null>(null);
+  const realMirrorRef = useRef<PaperSniperPosition | null>(null);
   const positionsRef = useRef<PaperSniperPosition[]>([]);
   const autoPaperRef = useRef(true);
   const wsRef = useRef<WebSocket | null>(null);
@@ -297,9 +312,43 @@ export default function LaunchRadar() {
 
   useEffect(() => { autoPaperRef.current = autoPaper; }, [autoPaper]);
 
+  useEffect(() => {
+    try {
+      const saved = window.sessionStorage.getItem("memescope:real-control:v1");
+      if (saved) setRealToken(saved);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try {
+      if (realToken) window.sessionStorage.setItem("memescope:real-control:v1", realToken);
+      else window.sessionStorage.removeItem("memescope:real-control:v1");
+    } catch {}
+  }, [realToken]);
+
   useEffect(() => { realArmedRef.current = realArmed; }, [realArmed]);
   useEffect(() => { realBusyRef.current = realBusy; }, [realBusy]);
   useEffect(() => { realTokenRef.current = realToken; }, [realToken]);
+
+  const applyRealResponse = (data: any) => {
+    if (!data) return;
+    setRealStatus((prev: any) => ({ ...(prev ?? {}), ...data }));
+    if (data?.state) {
+      realOpenMintRef.current = data.state.openMint ?? null;
+      if (typeof data.state.armed === "boolean") {
+        realArmedRef.current = data.state.armed;
+        setRealArmed(data.state.armed);
+      }
+      if (data.state.openMint && data.state.exitRequested) {
+        realExitPendingRef.current = true;
+      }
+      if (!data.state.openMint) {
+        realExitPendingRef.current = false;
+        realExitMarketCapRef.current = null;
+        realMirrorRef.current = null;
+        setRealMirror(null);
+      }
+    }
+  };
 
   const realRequest = async (method: "GET" | "POST", body?: any) => {
     const token = realTokenRef.current.trim();
@@ -311,61 +360,100 @@ export default function LaunchRadar() {
       cache: "no-store",
     });
     const data = await response.json();
-    if (!response.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${response.status}`);
-    setRealStatus(data);
-    realOpenMintRef.current = data?.state?.openMint ?? null;
-    if (typeof data?.state?.armed === "boolean") {
-      realArmedRef.current = data.state.armed;
-      setRealArmed(data.state.armed);
+    applyRealResponse(data);
+    if (!response.ok || !data?.ok) {
+      if (data?.skip) throw new Error(`SKIP_TOKEN · ${data?.reason ?? data?.error ?? "preflight"}`);
+      if (data?.retry) throw new Error(`SELL_RETRY · ${data?.error ?? "exit pending"}`);
+      throw new Error(data?.error ?? `HTTP ${response.status}`);
     }
     return data;
   };
 
-  const recoverRealPosition = async (state: any) => {
+  const seedRealMirror = (state: any) => {
     const mint = typeof state?.openMint === "string" ? state.openMint : "";
-    if (!mint || positionsRef.current.some((p) => p.mint === mint && p.status === "open")) return;
-
     const mc = Number(state?.openEntryMarketCapSol);
-    if (!(mc > 0)) {
-      // We cannot reconstruct the exit logic safely without the original entry
-      // reference. Autonomous policy: flatten the orphaned position instead of
-      // asking the user to make a trading decision.
-      realExitPendingRef.current = true;
-      realExitReasonRef.current = "legacy_orphan_recovery";
-      setRealError("Posición antigua sin entry price: V23.2 está intentando venderla automáticamente.");
-      void realSellIfOpen(mint, "legacy_orphan_recovery");
-      return;
-    }
-
-    const recovered: PaperSniperPosition = {
+    if (!mint || !(mc > 0)) return null;
+    const existing = realMirrorRef.current;
+    if (existing?.mint === mint) return existing;
+    const mirror: PaperSniperPosition = {
       mint,
-      name: state?.openName || "REAL POSITION RECOVERY",
+      name: state?.openName || "REAL POSITION",
       symbol: state?.openSymbol || "REAL",
       openedAt: Number(state?.openOpenedAt) > 0 ? Number(state.openOpenedAt) : Date.now(),
-      closedAt:null,status:"open",entryMarketCapSol:mc,currentMarketCapSol:mc,peakMarketCapSol:mc,troughMarketCapSol:mc,
-      grossReturnPct:0,netReturnPct:0,peakReturnPct:0,drawdownFromPeakPct:0,exitReason:null,
-      tradeCount:0,buys:0,sells:0,ticks:[],observedPriceTicks:0,validResult:false,
+      closedAt: null,
+      status: "open",
+      entryMarketCapSol: mc,
+      currentMarketCapSol: mc,
+      peakMarketCapSol: mc,
+      troughMarketCapSol: mc,
+      grossReturnPct: 0,
+      netReturnPct: 0,
+      peakReturnPct: 0,
+      drawdownFromPeakPct: 0,
+      exitReason: null,
+      tradeCount: 0,
+      buys: 0,
+      sells: 0,
+      ticks: [],
+      observedPriceTicks: 0,
+      validResult: false,
     };
-    const next=[recovered,...positionsRef.current].slice(0,120);
-    positionsRef.current=next;
-    setSniperPositions(next);
+    realMirrorRef.current = mirror;
+    setRealMirror(mirror);
+    return mirror;
+  };
 
-    // Re-subscribe immediately after a refresh/reconnect instead of waiting for
-    // another token creation event.
+  const recoverRealPosition = async (state: any) => {
+    const mint = typeof state?.openMint === "string" ? state.openMint : "";
+    if (!mint) return;
+    seedRealMirror(state);
     try {
       if (streamSource === "pumpdev" && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ method:"subscribeTokenTrade", keys:[mint] }));
+        wsRef.current.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
       } else if (tradeWsRef.current?.readyState === WebSocket.OPEN) {
-        tradeWsRef.current.send(JSON.stringify({ method:"subscribeTokenTrade", keys:[mint] }));
+        tradeWsRef.current.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
       }
     } catch {}
+  };
+  const reconcileRealPosition = async () => {
+    if (realBusyRef.current) return;
+    try {
+      realBusyRef.current = true;
+      setRealBusy(true);
+      const data = await realRequest("POST", {
+        action: "reconcile",
+        paperExitMarketCapSol: realExitMarketCapRef.current,
+      });
+      if (!data?.state?.openMint) {
+        realExitPendingRef.current = false;
+        realMirrorRef.current = null;
+        setRealMirror(null);
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "SELL recovery";
+      if (!/SELL_RETRY|TRADE_BUSY/i.test(message)) setRealError(message);
+    } finally {
+      realBusyRef.current = false;
+      setRealBusy(false);
+    }
   };
 
   const refreshRealStatus = async () => {
     try {
       setRealError(null);
-      const data=await realRequest("GET");
-      if (data?.state?.openMint) await recoverRealPosition(data.state);
+      const data = await realRequest("GET");
+      if (data?.state?.openMint) {
+        await recoverRealPosition(data.state);
+        const chainKnown = !data?.chainPositionError && data?.chainPosition != null;
+        const raw = chainKnown ? String(data.chainPosition.raw ?? "0") : null;
+        const ageMs = Math.max(0, Date.now() - Number(data.state.openOpenedAt || data.state.sellRetrySince || data.state.startedAt || Date.now()));
+        const staleMs = Math.max(30_000, Number(data?.stalePositionMs ?? 120_000));
+        const shouldRecover = (chainKnown && raw === "0") || Boolean(data.state.exitRequested) || ageMs >= staleMs;
+        if (shouldRecover) {
+          realExitPendingRef.current = true;
+          void reconcileRealPosition();
+        }
+      }
     } catch (e) { setRealError(e instanceof Error ? e.message : "Error REAL TEST"); }
   };
 
@@ -380,6 +468,7 @@ export default function LaunchRadar() {
       setRealError(null);
       const data = await realRequest("POST", { action: "buy", mint, entryMarketCapSol, name, symbol });
       realOpenMintRef.current = data?.state?.openMint ?? mint;
+      if (data?.state?.openMint) seedRealMirror(data.state);
       if (data?.state?.stopped || data?.state?.armed === false) {
         realArmedRef.current=false;
         setRealArmed(false);
@@ -387,11 +476,11 @@ export default function LaunchRadar() {
     } catch (e) {
       const message = e instanceof Error ? e.message : "BUY real falló";
       const transientSlippage =
-        /TooMuchSolRequired|\b6002\b|0x1772|slippage.*too much sol|required to buy/i.test(message);
+        /SKIP_TOKEN|PREBUY_SKIP|TooMuchSolRequired|TooLittleSolReceived|\b6002\b|\b6003\b|\b6005\b|\b6024\b|0x1772|0x1773|0x1775|0x1788|Overflow|BondingCurveComplete|slippage|blockhash|expired/i.test(message);
       if (transientSlippage) {
         // The token ran away before execution. Do NOT chase it and do NOT stop
         // the experiment: skip this mint and wait for the next launch.
-        setRealError("SKIP TOKEN · preço/slippage fugiu antes do BUY. Bot continua ARMED.");
+        setRealError("SKIP TOKEN · preflight/custo/slippage não passou. Bot continua ARMED.");
       } else {
         setRealError(message);
         // Unknown execution/config errors still fail closed.
@@ -404,36 +493,75 @@ export default function LaunchRadar() {
     }
   };
 
-  const realSellIfOpen = async (mint: string, reason: string) => {
-    if (realOpenMintRef.current !== mint || realBusyRef.current) return;
+  const maybeEnterReal = (p: PaperSniperPosition) => {
+    if (!realArmedRef.current || realBusyRef.current || realOpenMintRef.current) return;
+    if (!hasValidPaperData(p)) return;
+    const ageMs = Date.now() - p.openedAt;
+    const ticks = p.ticks.slice(-5);
+    if (ticks.length < 3) return;
+    const recentMove = ret(ticks[Math.max(0, ticks.length - 3)].marketCapSol, p.currentMarketCapSol);
+    const directionalTrades = p.buys + p.sells;
+    const buyRatio = directionalTrades > 0 ? p.buys / directionalTrades : null;
+    const earlyEnough = ageMs >= REAL_ENTRY_MIN_AGE_MS && ageMs <= REAL_ENTRY_MAX_AGE_MS;
+    const moving = p.grossReturnPct >= REAL_ENTRY_MIN_RETURN_PCT
+      && p.grossReturnPct <= REAL_ENTRY_MAX_RETURN_PCT
+      && recentMove >= REAL_ENTRY_MIN_RECENT_MOVE_PCT;
+    const notReversing = p.drawdownFromPeakPct > REAL_ENTRY_MAX_DRAWDOWN_PCT;
+    const pressureOk = buyRatio == null
+      ? recentMove >= 1.0
+      : p.buys >= 2 && buyRatio >= REAL_ENTRY_MIN_BUY_RATIO;
+    if (!earlyEnough || !moving || !notReversing || !pressureOk) return;
+    void realBuyIfArmed(p.mint, p.currentMarketCapSol, p.name, p.symbol);
+  };
+
+  const realSellIfOpen = async (mint: string, reason: string, paperExitMarketCapSol?: number | null) => {
+    if (realOpenMintRef.current !== mint || realBusyRef.current || realExitPendingRef.current) return;
     realExitPendingRef.current = true;
     realExitReasonRef.current = reason || "autonomous_exit";
+    if (paperExitMarketCapSol && paperExitMarketCapSol > 0) realExitMarketCapRef.current = paperExitMarketCapSol;
     try {
-      realBusyRef.current=true;
+      realBusyRef.current = true;
       setRealBusy(true);
       setRealError(null);
-      const data = await realRequest("POST", { action: "sell", mint, reason });
-      realOpenMintRef.current = data?.state?.openMint ?? null;
-      if (!realOpenMintRef.current) {
+      const data = await realRequest("POST", {
+        action: "sell",
+        mint,
+        reason,
+        paperExitMarketCapSol: realExitMarketCapRef.current,
+      });
+      if (!data?.state?.openMint) {
         realExitPendingRef.current = false;
-      }
-      if (data?.state?.stopped) {
-        realArmedRef.current = false;
-        setRealArmed(false);
+        realExitMarketCapRef.current = null;
+        realMirrorRef.current = null;
+        setRealMirror(null);
+        try {
+          wsRef.current?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
+          tradeWsRef.current?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
+        } catch {}
       }
     } catch (e) {
-      // An exit failure is not handed back to the user. New BUYs are paused,
-      // while the retry loop below keeps trying to flatten the same mint.
-      const msg = e instanceof Error ? e.message : "error";
-      setRealError(`SELL RETRY automático · ${msg}`);
-      realArmedRef.current = false;
-      setRealArmed(false);
+      const msg = e instanceof Error ? e.message : "SELL retry";
+      if (!/SELL_RETRY|TRADE_BUSY/i.test(msg)) setRealError(`SELL recovery · ${msg}`);
     } finally {
-      realBusyRef.current=false;
+      realBusyRef.current = false;
       setRealBusy(false);
     }
   };
 
+  const updateRealMirrorTick = (mint: string, marketCapSol: number, side: SniperTick["side"], now: number) => {
+    const current = realMirrorRef.current;
+    if (!current || current.mint !== mint || current.status !== "open" || !(marketCapSol > 0)) return;
+    const { updated, reason } = evaluatePaperTick(current, marketCapSol, side, now);
+    realMirrorRef.current = updated;
+    setRealMirror(updated);
+    // PAPER needs three observations to call a result statistically valid. REAL
+    // capital does not get that luxury: one post-fill quote below -12% is enough
+    // to request an emergency exit instead of waiting for validation ticks.
+    const emergencyHardStop = updated.observedPriceTicks >= 1 && updated.grossReturnPct <= -12;
+    if ((reason || emergencyHardStop) && !realExitPendingRef.current) {
+      void realSellIfOpen(mint, reason ?? "hard_stop", marketCapSol);
+    }
+  };
   useEffect(() => {
     if (!realToken) return;
     refreshRealStatus();
@@ -443,9 +571,8 @@ export default function LaunchRadar() {
   useEffect(() => {
     if (!realToken) return;
     const id = window.setInterval(() => {
-      const mint = realOpenMintRef.current;
-      if (!mint || !realExitPendingRef.current || realBusyRef.current) return;
-      void realSellIfOpen(mint, realExitReasonRef.current || "autonomous_retry");
+      if (!realOpenMintRef.current || !realExitPendingRef.current || realBusyRef.current) return;
+      void reconcileRealPosition();
     }, 4_000);
     return () => window.clearInterval(id);
   }, [realToken]);
@@ -481,8 +608,11 @@ export default function LaunchRadar() {
     if (!closed) return;
     positionsRef.current = next;
     setSniperPositions(next);
-    if (reason !== "no_data") void realSellIfOpen(mint, reason);
-    try { wsRef.current?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
+    // PAPER and REAL share the same policy, but REAL is anchored at its later,
+    // actual entry. A birth-anchored PAPER close must not directly liquidate REAL.
+    if (realOpenMintRef.current !== mint) {
+      try { wsRef.current?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
+    }
   };
 
   const evaluatePaperTick = (position: PaperSniperPosition, marketCapSol: number, side: SniperTick["side"], now: number) => {
@@ -510,11 +640,11 @@ export default function LaunchRadar() {
     // cannot declare a win/loss/stop/reversal.
     if (enoughMarketData && gross <= -12) reason = "hard_stop";
     else if (enoughMarketData && ageMs >= 2_000 && peakReturn >= 8) {
-      // Dynamic trailing: react faster once the token has already made a sharp move.
+      // A price-only trailing stop works on BOTH PumpDev and DexScreener fallback.
+      // V25 incorrectly made smaller trailing exits depend on sell-side trade data,
+      // which Dex fallback does not have and could therefore ride a winner down.
       const trail = peakReturn >= 100 ? -12 : peakReturn >= 50 ? -10 : peakReturn >= 20 ? -8 : -6;
-      const sellPressure = sellCount >= 2 && sellCount > buyCount;
-      const rapidDrop = recent.length >= 2 && ret(recent[0].marketCapSol, marketCapSol) <= -8;
-      if (drawdown <= trail && (sellPressure || rapidDrop || peakReturn >= 50)) reason = "reversal";
+      if (drawdown <= trail) reason = "reversal";
     }
     if (!reason && enoughMarketData && ageMs >= 4_000 && gross > 3 && sellCount >= 3 && sellCount >= buyCount * 2) reason = "sell_pressure";
     if (!reason && enoughMarketData && ageMs >= 30_000 && peakReturn < 5 && gross <= 0) reason = "no_momentum";
@@ -538,6 +668,10 @@ export default function LaunchRadar() {
       setInstant((items) => items.filter((x) => now - x.createdAt <= 5 * 60_000));
       for (const p of positionsRef.current) {
         if (p.status === "open" && now - p.openedAt >= 90_000) closePaper(p.mint, "time_exit");
+      }
+      const real = realMirrorRef.current;
+      if (real && real.status === "open" && now - real.openedAt >= 90_000 && !realExitPendingRef.current) {
+        void realSellIfOpen(real.mint, "time_exit", real.currentMarketCapSol);
       }
     }, 1_000);
     return () => window.clearInterval(timer);
@@ -619,7 +753,8 @@ export default function LaunchRadar() {
           setStreamError(null);
           ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
           if (provider.supportsTrades) {
-            const openMints = positionsRef.current.filter((p) => p.status === "open").slice(0, SNIPER_MAX_OPEN).map((p) => p.mint);
+            const paperMints = positionsRef.current.filter((p) => p.status === "open").slice(0, SNIPER_MAX_OPEN).map((p) => p.mint);
+            const openMints = [...new Set([...paperMints, ...(realOpenMintRef.current ? [realOpenMintRef.current] : [])])];
             if (openMints.length) ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: openMints }));
           }
         };
@@ -659,9 +794,7 @@ export default function LaunchRadar() {
                 const next = [p, ...positionsRef.current].slice(0, 120);
                 positionsRef.current = next;
                 setSniperPositions(next);
-                // REAL TEST mirrors only the first paper position while armed.
-                // Server enforces 1 open position + 20-entry hard cap.
-                void realBuyIfArmed(mint, mc, token.name, token.symbol);
+                // V26 REAL waits for confirmed momentum; no blind BUY at creation.
                 if (provider.supportsTrades) {
                   ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
                 } else if (tradeWsRef.current?.readyState === WebSocket.OPEN) {
@@ -672,12 +805,14 @@ export default function LaunchRadar() {
             }
 
             if (provider.supportsTrades && (msg?.txType === "buy" || msg?.txType === "sell")) {
-              const current = positionsRef.current.find((p) => p.mint === mint && p.status === "open");
-              if (!current) return;
               const mc = typeof msg?.marketCapSol === "number" ? msg.marketCapSol : (typeof msg?.marketCapQuote === "number" ? msg.marketCapQuote : null);
               if (!mc || mc <= 0) return;
               const side: SniperTick["side"] = msg.txType === "buy" ? "buy" : "sell";
-              const { updated, reason } = evaluatePaperTick(current, mc, side, Date.now());
+              const now = Date.now();
+              updateRealMirrorTick(mint, mc, side, now);
+              const current = positionsRef.current.find((p) => p.mint === mint && p.status === "open");
+              if (!current) return;
+              const { updated, reason } = evaluatePaperTick(current, mc, side, now);
               if (reason) {
                 // Store the latest validated tick first, then route ALL closure
                 // through closePaper so one code path decides validity/PnL.
@@ -685,11 +820,14 @@ export default function LaunchRadar() {
                 positionsRef.current = staged;
                 setSniperPositions(staged);
                 closePaper(mint, reason, mc);
-                try { ws?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
+                if (realOpenMintRef.current !== mint) {
+                  try { ws?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
+                }
               } else {
                 const next = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
                 positionsRef.current = next;
                 setSniperPositions(next);
+                maybeEnterReal(updated);
               }
             }
           } catch (error) {
@@ -746,22 +884,27 @@ export default function LaunchRadar() {
     const applyTrade = (msg: any) => {
       const mint = typeof msg?.mint === "string" ? msg.mint : "";
       if (!mint || (msg?.txType !== "buy" && msg?.txType !== "sell")) return;
-      const current = positionsRef.current.find((p) => p.mint === mint && p.status === "open");
-      if (!current) return;
       const mc = typeof msg?.marketCapSol === "number" ? msg.marketCapSol : (typeof msg?.marketCapQuote === "number" ? msg.marketCapQuote : null);
       if (!mc || mc <= 0) return;
       const side: SniperTick["side"] = msg.txType === "buy" ? "buy" : "sell";
-      const { updated, reason } = evaluatePaperTick(current, mc, side, Date.now());
+      const now = Date.now();
+      updateRealMirrorTick(mint, mc, side, now);
+      const current = positionsRef.current.find((p) => p.mint === mint && p.status === "open");
+      if (!current) return;
+      const { updated, reason } = evaluatePaperTick(current, mc, side, now);
       if (reason) {
         const staged = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
         positionsRef.current = staged;
         setSniperPositions(staged);
         closePaper(mint, reason, mc);
-        try { socket?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
+        if (realOpenMintRef.current !== mint) {
+          try { socket?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
+        }
       } else {
         const next = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
         positionsRef.current = next;
         setSniperPositions(next);
+                maybeEnterReal(updated);
       }
     };
 
@@ -774,7 +917,8 @@ export default function LaunchRadar() {
         socket.onopen = () => {
           window.clearTimeout(timeout);
           setTradeStreamState("live");
-          const keys = positionsRef.current.filter((p) => p.status === "open").slice(0, SNIPER_MAX_OPEN).map((p) => p.mint);
+          const paperKeys = positionsRef.current.filter((p) => p.status === "open").slice(0, SNIPER_MAX_OPEN).map((p) => p.mint);
+          const keys = [...new Set([...paperKeys, ...(realOpenMintRef.current ? [realOpenMintRef.current] : [])])];
           if (keys.length) socket?.send(JSON.stringify({ method: "subscribeTokenTrade", keys }));
         };
         socket.onmessage = (event) => { try { applyTrade(JSON.parse(String(event.data))); } catch {} };
@@ -810,10 +954,11 @@ export default function LaunchRadar() {
       // PumpDev LIVE already gives tick-by-tick trade events; do not duplicate them.
       if (streamState === "live" && streamSource === "pumpdev") return;
       const open = positionsRef.current.filter((p) => p.status === "open").slice(0, SNIPER_MAX_OPEN);
-      if (!open.length) return;
+      const realOpenMint = realOpenMintRef.current;
+      if (!open.length && !realOpenMint) return;
       busy = true;
       try {
-        const addresses = open.map((p) => p.mint).join(",");
+        const addresses = [...new Set([...open.map((p) => p.mint), ...(realOpenMint ? [realOpenMint] : [])])].join(",");
         const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${addresses}`, { cache: "no-store" });
         if (!res.ok) return;
         const pairs = await res.json() as Array<{ baseToken?: { address?: string }; quoteToken?: { address?: string }; marketCap?: number; fdv?: number; priceUsd?: string }>;
@@ -832,7 +977,9 @@ export default function LaunchRadar() {
           const p = next[idx];
           const existingDexTick = p.ticks.find((t) => t.side === "other" && (t as SniperTick & { dexUsd?: number }).dexUsd != null) as (SniperTick & { dexUsd?: number }) | undefined;
           const anchorUsd = existingDexTick?.dexUsd;
-          const relativeMc = anchorUsd && anchorUsd > 0 ? p.entryMarketCapSol * (mcUsd / anchorUsd) : p.currentMarketCapSol;
+          const relativeMc = anchorUsd && anchorUsd > 0 && existingDexTick
+            ? existingDexTick.marketCapSol * (mcUsd / anchorUsd)
+            : p.currentMarketCapSol;
           const tick = { t: now, marketCapSol: relativeMc, side: "other" as const, dexUsd: mcUsd } as SniperTick & { dexUsd: number };
           const base = { ...p, ticks: [...p.ticks, tick].slice(-80) };
           if (!anchorUsd) {
@@ -854,9 +1001,30 @@ export default function LaunchRadar() {
             };
           } else {
             next[idx] = evaluated.updated;
+            maybeEnterReal(evaluated.updated);
           }
           changed = true;
         }
+
+        const realPosition = realMirrorRef.current;
+        if (realPosition && realPosition.status === "open") {
+          const pair = pairs.find((x) => x.baseToken?.address === realPosition.mint || x.quoteToken?.address === realPosition.mint);
+          const mcUsd = typeof pair?.marketCap === "number" ? pair.marketCap : (typeof pair?.fdv === "number" ? pair.fdv : null);
+          if (mcUsd && mcUsd > 0) {
+            const existingDexTick = realPosition.ticks.find((t) => t.side === "other" && (t as SniperTick & { dexUsd?: number }).dexUsd != null) as (SniperTick & { dexUsd?: number }) | undefined;
+            const anchorUsd = existingDexTick?.dexUsd;
+            if (!anchorUsd) {
+              const anchorTick = { t: now, marketCapSol: realPosition.currentMarketCapSol, side: "other" as const, dexUsd: mcUsd } as SniperTick & { dexUsd: number };
+              const anchored = { ...realPosition, ticks: [...realPosition.ticks, anchorTick].slice(-80) };
+              realMirrorRef.current = anchored;
+              setRealMirror(anchored);
+            } else {
+              const relativeMc = existingDexTick.marketCapSol * (mcUsd / anchorUsd);
+              updateRealMirrorTick(realPosition.mint, relativeMc, "other", now);
+            }
+          }
+        }
+
         if (changed) {
           positionsRef.current = next;
           setSniperPositions(next);
@@ -897,10 +1065,13 @@ export default function LaunchRadar() {
   const maxDrawdownUsd = maxPaperDrawdownUsd(sniperValid);
   const bestTrade = sniperValid.length ? [...sniperValid].sort((a,b) => b.netReturnPct - a.netReturnPct)[0] : null;
   const worstTrade = sniperValid.length ? [...sniperValid].sort((a,b) => a.netReturnPct - b.netReturnPct)[0] : null;
-  const trimCount = sniperValid.length >= 20 ? Math.max(1, Math.ceil(sniperValid.length * 0.01)) : 0;
+  const trimCount = sniperValid.length ? Math.max(1, Math.ceil(sniperValid.length * 0.01)) : 0;
   const trimmedTrades = [...sniperValid].sort((a,b) => b.netReturnPct - a.netReturnPct).slice(trimCount);
   const pnlWithoutTop1Pct = trimmedTrades.reduce((sum,p) => sum + paperTradePnlUsd(p), 0);
   const topTradeShare = sniperPnlUsd > 0 && bestTrade ? (paperTradePnlUsd(bestTrade) / sniperPnlUsd) * 100 : null;
+  const realTrackedPosition = realStatus?.state?.openMint && realMirror?.mint === realStatus.state.openMint
+    ? realMirror
+    : null;
   return <section className="space-y-5">
     <div className="rounded-2xl border border-[var(--accent-info)]/35 bg-[var(--surface)] p-5">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-display text-xl font-semibold">⚡ Launch Radar</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Solo Solana · primeros 5 minutos. Ya no escondemos un lanzamiento por tener poco volumen o liquidez: primero lo ves, después decides si está despertando.</p></div><div className="text-right text-xs text-[var(--text-muted)]"><div className="font-data text-sm"><b>{launch.length}</b> pares &lt;5m</div><div>escaneados: <b>{feed?.scannedTokens ?? 0}</b></div></div></div>
@@ -908,13 +1079,13 @@ export default function LaunchRadar() {
     </div>
     <div className="rounded-2xl border border-[var(--accent-risk)]/35 bg-[var(--surface)] p-4 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h3 className="font-display text-base font-semibold">🧨 V22 REAL TEST · HOT WALLET AISLADA</h3><p className="text-[10px] text-[var(--text-muted)]">Máximo 20 BUY reales · 1 posición simultánea · reutiliza únicamente el saldo de la wallet experimental · el servidor se detiene al llegar a 20 o quedarse sin saldo operativo.</p></div>
+        <div><h3 className="font-display text-base font-semibold">🧠 V26.1 REAL CORE · AUTONOMOUS MANAGER</h3><p className="text-[10px] text-[var(--text-muted)]">Máximo 20 BUY reais · 1 posição ativa · entrada confirmada + preflight. O mirror REAL é ancorado no fill efetivo, não no preço anterior do PAPER. Saída autónoma com trailing/stop, reconciliação on-chain e quarentena automática de tokens realmente invendáveis.</p></div>
         <div className={`font-data text-xs font-bold ${realArmed ? "text-[var(--accent-risk)]" : "text-[var(--text-muted)]"}`}>{realArmed ? "● ARMED" : "○ SAFE / OFF"}</div>
       </div>
       <div className="grid md:grid-cols-[1fr_auto_auto] gap-2">
         <input type="password" value={realToken} onChange={(e)=>setRealToken(e.target.value)} placeholder="REAL CONTROL TOKEN (no es tu seed)" className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-xs outline-none" />
         <button onClick={refreshRealStatus} className="rounded-lg border border-[var(--border)] px-3 py-2 text-xs">Comprobar wallet</button>
-        <button disabled={!realStatus?.ok || realStatus?.state?.stopped || realBusy} onClick={async()=>{
+        <button disabled={!realStatus?.ok || realBusy || (realStatus?.state?.stopped && realStatus?.state?.stopReason !== "manual")} onClick={async()=>{
           try{
             const data=await realRequest("POST",{action:realArmed?"disarm":"arm"});
             const armed=Boolean(data?.state?.armed);
@@ -922,26 +1093,48 @@ export default function LaunchRadar() {
           }catch(e){setRealError(e instanceof Error?e.message:"No se pudo cambiar ARMED");}
         }} className={`rounded-lg border px-3 py-2 text-xs font-bold ${realArmed ? "border-[var(--accent-risk)] text-[var(--accent-risk)]" : "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]"} disabled:opacity-40`}>{realArmed ? "DESARMAR" : "ARM REAL TEST"}</button>
       </div>
-      {realStatus?.ok && <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[10px]">
-        <div className="rounded bg-[var(--surface-2)] p-2">Wallet<div className="font-data">{realStatus.wallet?.publicKey?.slice(0,6)}…{realStatus.wallet?.publicKey?.slice(-4)}</div></div>
-        <div className="rounded bg-[var(--surface-2)] p-2">Saldo SOL<div className="font-data font-bold">{Number(realStatus.wallet?.balanceSol ?? 0).toFixed(5)}</div></div>
-        <div className="rounded bg-[var(--surface-2)] p-2">Entradas<div className="font-data font-bold">{realStatus.state?.entries ?? 0}/20</div></div>
-        <div className="rounded bg-[var(--surface-2)] p-2">Posición<div className="font-data">{realStatus.state?.openMint ? `${String(realStatus.state.openMint).slice(0,6)}…` : "ninguna"}</div></div>
-        <div className="rounded bg-[var(--surface-2)] p-2">Compra/entrada<div className="font-data">{Math.round(Number(realStatus.buyFraction ?? .25)*100)}% saldo</div></div>
+      {realStatus?.ok && <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
+        <div className="rounded bg-[var(--surface-2)] p-2">Saldo SOL<div className="font-data font-bold">{Number(realStatus.wallet?.balanceSol ?? 0).toFixed(5)}</div><div className="text-[9px] text-[var(--text-faint)]">{realStatus.wallet?.publicKey?.slice(0,6)}…{realStatus.wallet?.publicKey?.slice(-4)}</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">Entradas<div className="font-data font-bold">{realStatus.state?.entries ?? 0}/20</div><div className="text-[9px] text-[var(--text-faint)]">skips: {Number(realStatus.state?.skippedBuys)||0}</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">Compra/entrada<div className="font-data font-bold">{Math.round(Number(realStatus.buyFraction ?? .20)*100)}% saldo</div><div className="text-[9px] text-[var(--text-faint)]">preflight antes do envio</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">PnL REAL<div className={`font-data font-bold ${(Number(realStatus.state?.realizedPnlSol)||0)>=0?"text-[var(--accent-opportunity)]":"text-[var(--accent-risk)]"}`}>{(Number(realStatus.state?.realizedPnlSol)||0)>=0?"+":""}{(Number(realStatus.state?.realizedPnlSol)||0).toFixed(6)} SOL</div><div className="text-[9px] text-[var(--text-faint)]">W/L {Number(realStatus.state?.wins)||0}/{Number(realStatus.state?.losses)||0}</div></div>
+      </div>}
+      {realStatus?.state?.openMint && <div className="rounded-xl border border-[var(--accent-risk)]/35 bg-[var(--surface-2)] p-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div><div className="text-[9px] font-semibold text-[var(--accent-risk)]">● REAL POSITION · MANAGED AUTOMATICALLY</div><b>{realStatus.state?.openName || realTrackedPosition?.name || "Token real"}</b> <span className="text-[var(--text-muted)]">${realStatus.state?.openSymbol || realTrackedPosition?.symbol || "?"}</span><div className="font-data text-[9px] text-[var(--text-faint)]">{String(realStatus.state.openMint)}</div></div>
+          <div className="text-right"><div className="text-[9px] text-[var(--text-faint)]">estado</div><b className="text-[var(--accent-opportunity)]">{realStatus.state?.exitRequested || realExitPendingRef.current ? `SELL RETRY ${Number(realStatus.state?.sellRetryCount)||0}` : "MONITORING"}</b></div>
+        </div>
+        <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
+          <div>Mirror desde entry real<div className="font-data font-semibold">{realTrackedPosition && Number(realStatus.state?.openEntryMarketCapSol)>0 ? pctText(ret(Number(realStatus.state.openEntryMarketCapSol), realTrackedPosition.currentMarketCapSol)) : "a validar"}</div></div>
+          <div>Peak monitor<div className="font-data font-semibold">{realTrackedPosition ? pctText(realTrackedPosition.peakReturnPct) : "a validar"}</div></div>
+          <div>Idade<div className="font-data font-semibold">{realStatus.state?.openOpenedAt ? `${Math.max(0,Math.floor((clock-Number(realStatus.state.openOpenedAt))/1000))}s` : "—"}</div></div>
+          <div>On-chain<div className="font-data font-semibold">{realStatus?.chainPositionError ? "RPC a reintentar" : String(realStatus?.chainPosition?.raw ?? "0") === "0" ? "0 tokens" : `${String(realStatus?.chainPosition?.raw ?? "?").slice(0,12)} raw`}</div><div className="text-[9px] text-[var(--text-faint)]">{realStatus?.chainPositionError ? "estado preservado" : `${Number(realStatus?.chainPosition?.accounts?.length)||0} account(s)`}</div></div>
+        </div>
+      </div>}
+      {realStatus?.ok && <div className="rounded-xl border border-[var(--accent-info)]/25 bg-[var(--surface-2)] p-3 text-[10px]">
+        <b>Paper ↔ Real · última saída</b>
+        <div className="mt-1 grid grid-cols-2 md:grid-cols-4 gap-2">
+          <div>Signal→exit<div className="font-data">{realStatus.state?.lastSignalReturnPct == null ? "N/D" : pctText(Number(realStatus.state.lastSignalReturnPct))}</div></div>
+          <div>Entry gap<div className={`font-data ${Number(realStatus.state?.lastEntryGapPct)>5?"text-[var(--accent-risk)]":""}`}>{realStatus.state?.lastEntryGapPct == null ? "N/D" : pctText(Number(realStatus.state.lastEntryGapPct))}</div></div>
+          <div>Fill mirror<div className="font-data">{realStatus.state?.lastPaperMirrorReturnPct == null ? "N/D" : pctText(Number(realStatus.state.lastPaperMirrorReturnPct))}</div></div>
+          <div>Real líquido<div className="font-data">{realStatus.state?.lastTradeReturnPct == null ? "N/D" : pctText(Number(realStatus.state.lastTradeReturnPct))}</div><div className={`font-data text-[9px] ${Number(realStatus.state?.lastExecutionGapPct)<0?"text-[var(--accent-risk)]":"text-[var(--accent-opportunity)]"}`}>gap {realStatus.state?.lastExecutionGapPct == null ? "N/D" : pctText(Number(realStatus.state.lastExecutionGapPct))}</div></div>
+        </div>
       </div>}
       <div className="flex flex-wrap gap-2">
         <button onClick={async()=>{ try{ const data=await realRequest("POST",{action:"stop"}); realArmedRef.current=false; setRealArmed(false); setRealStatus(data); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--accent-risk)] px-3 py-1.5 text-xs font-bold text-[var(--accent-risk)]">■ KILL SWITCH</button>
         {realStatus?.state?.openMint && <button disabled={realBusy} onClick={async()=>{
-          if(!confirm("Vender AHORA el 100% de la posición real abierta?")) return;
-          await realSellIfOpen(String(realStatus.state.openMint),"manual_recovery");
+          realExitPendingRef.current = true;
+          realExitReasonRef.current = "emergency_reconcile";
+          await reconcileRealPosition();
           await refreshRealStatus();
-        }} className="rounded-lg border border-[var(--accent-gold)]/60 px-3 py-1.5 text-xs font-bold text-[var(--accent-gold)] disabled:opacity-40">EMERGENCY SELL (backup)</button>}
+        }} className="rounded-lg border border-[var(--accent-gold)]/60 px-3 py-1.5 text-xs font-bold text-[var(--accent-gold)] disabled:opacity-40">EMERGENCY RECOVER (backup)</button>}
         <button onClick={async()=>{ if(!confirm("¿Resetear contador REAL TEST? Hazlo solo antes de una prueba nueva.")) return; try{ await realRequest("POST",{action:"reset"}); setRealArmed(false); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--text-muted)]">Reset contador</button>
         {realStatus?.state?.lastSignature && <a className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs" target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${realStatus.state.lastSignature}`}>Última TX ↗</a>}
       </div>
-      {realStatus?.state?.lastAction && <div className="text-[10px] text-[var(--text-muted)]">Última acción: <b>{realStatus.state.lastAction}</b></div>}
-      {(realError || realStatus?.state?.lastError) && <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk)]/5 p-2 text-[10px] text-[var(--accent-risk)]">{realError ?? realStatus.state.lastError}</div>}
-      <div className="text-[9px] text-[var(--text-faint)]">V23.2 AUTONOMOUS: posições órfãs são fechadas automaticamente; SELL falhado entra em retry automático; BUY com slippage 6002 é ignorado e o bot segue para a próxima moeda. PnL REAL mede o delta da wallet BUY→SELL incluindo fees. ARMED queda persistido en Redis, una posición abierta se recupera tras refrescar la página y SELL sigue permitido aunque el Kill Switch esté activo. La private key nunca se envía al navegador. `priorityFee` por defecto = 0.00005 SOL; Solscan puede abreviar los ceros con subíndices.</div>
+      {realStatus?.state?.lastAction && <div className="text-[10px] text-[var(--text-muted)]">Última acción: <b>{realStatus.state.lastAction}</b>{realStatus.state?.stopReason ? <span> · stop: <b>{String(realStatus.state.stopReason)}</b></span> : null}{Number(realStatus.state?.abandonedCount)>0 ? <span> · quarantine: <b>{Number(realStatus.state.abandonedCount)}</b></span> : null}</div>}
+      {realStatus?.state?.lastQuarantineReason && <div className="rounded-lg border border-[var(--accent-gold)]/30 bg-[var(--accent-gold)]/5 p-2 text-[10px] text-[var(--text-muted)]">Quarantine não significa “vendido”: o runner deixou de ficar bloqueado por um token sem rota executável e registou o custo de forma conservadora. Último motivo: {String(realStatus.state.lastQuarantineReason).slice(0,240)}</div>}
+      {(realError || realStatus?.state?.lastError || realStatus?.state?.lastSellError) && <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk)]/5 p-2 text-[10px] text-[var(--accent-risk)]">{realError ?? realStatus.state.lastError ?? realStatus.state.lastSellError}</div>}
+      <div className="text-[9px] text-[var(--text-faint)]">V26.1 REAL CORE: o fill REAL é calculado a partir do SOL enviado, tokens realmente recebidos e supply on-chain. PAPER/REAL partilham a política de saída, inclusive no fallback DexScreener. SELL reconcilia saldo on-chain, alterna pools/slippage e pode usar Jupiter V2 como rota independente. Uma posição antiga que continue realmente invendável após recuperação é QUARANTINED e deixa de bloquear o runner; nunca é apresentada como se tivesse sido vendida. BUY 6002/6024/slippage vira SKIP. PnL REAL inclui fees.</div>
     </div>
 
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">
@@ -997,6 +1190,6 @@ export default function LaunchRadar() {
     </div>
     <div className="border-t border-[var(--border)] pt-4"><div className="mb-2 text-[10px] uppercase tracking-wider text-[var(--text-faint)]">DexScreener enrichment · cuando el par ya está indexado</div></div>
     {loading && !feed ? <div className="text-sm text-[var(--text-muted)]">Buscando lanzamientos…</div> : groups.map(([title, list]) => <div key={title} className="space-y-2"><div className="flex justify-between"><h3 className="font-display text-sm font-semibold">{title}</h3><span className="text-xs text-[var(--text-muted)]">{list.length}</span></div>{list.length ? <div className="grid lg:grid-cols-2 gap-3">{list.map(c => <LaunchCard key={c.tokenKey} c={c} />)}</div> : <div className="rounded-xl border border-dashed border-[var(--border)] p-4 text-xs text-[var(--text-muted)]">No hay ningún par confirmado por DexScreener en esta franja de edad ahora mismo. No es un filtro de volumen/liquidez: si existe un par ≤5m que nuestros feeds descubren, debería aparecer aquí.</div>}</div>)}
-    <div className="text-[10px] text-[var(--text-faint)]">V20.2: Direct Launch Stream + honest Paper Sniper + trades retry. Las operaciones del Sniper son simuladas en este navegador; no firma, compra ni vende tokens reales. DexScreener sigue siendo la capa de enriquecimiento posterior.</div>
+    <div className="text-[10px] text-[var(--text-faint)]">V26.1: Direct Launch Stream + Paper Sniper + REAL CORE autónomo. Paper sigue siendo simulado; REAL usa la wallet experimental únicamente cuando REAL TEST está ARMED. El estado real se reconcilia con Solana y una posición invendible queda QUARANTINED en vez de bloquear el runner indefinidamente.</div>
   </section>;
 }
