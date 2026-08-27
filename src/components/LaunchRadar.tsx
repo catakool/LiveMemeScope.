@@ -906,7 +906,7 @@ export default function LaunchRadar() {
       </div>
       {realStatus?.state?.lastAction && <div className="text-[10px] text-[var(--text-muted)]">Última acción: <b>{realStatus.state.lastAction}</b></div>}
       {(realError || realStatus?.state?.lastError) && <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk)]/5 p-2 text-[10px] text-[var(--accent-risk)]">{realError ?? realStatus.state.lastError}</div>}
-      <div className="text-[9px] text-[var(--text-faint)]">V22.1: ARMED queda persistido en Redis, una posición abierta se recupera tras refrescar la página y SELL sigue permitido aunque el Kill Switch esté activo. La private key nunca se envía al navegador. `priorityFee` por defecto = 0.00005 SOL; Solscan puede abreviar los ceros con subíndices.</div>
+      <div className="text-[9px] text-[var(--text-faint)]">V23: PnL REAL mede o delta da wallet BUY→SELL incluindo fees. ARMED queda persistido en Redis, una posición abierta se recupera tras refrescar la página y SELL sigue permitido aunque el Kill Switch esté activo. La private key nunca se envía al navegador. `priorityFee` por defecto = 0.00005 SOL; Solscan puede abreviar los ceros con subíndices.</div>
     </div>
 
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">

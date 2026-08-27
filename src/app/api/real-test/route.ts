@@ -20,6 +20,12 @@ type RealState = {
   openName?:string|null;
   openSymbol?:string|null;
   openOpenedAt?:number|null;
+  openBalanceBeforeBuySol?:number|null;
+  openBalanceAfterBuySol?:number|null;
+  realizedPnlSol?:number;
+  wins?:number; losses?:number;
+  lastTradePnlSol?:number|null;
+  lastTradeReturnPct?:number|null;
   lastAction:string|null;
   lastSignature:string|null;
   lastError:string|null;
@@ -55,6 +61,10 @@ async function getState(r:Redis){
     openName:raw.openName??null,
     openSymbol:raw.openSymbol??null,
     openOpenedAt:raw.openOpenedAt??null,
+    openBalanceBeforeBuySol:raw.openBalanceBeforeBuySol??null,
+    openBalanceAfterBuySol:raw.openBalanceAfterBuySol??null,
+    realizedPnlSol:Number(raw.realizedPnlSol)||0,wins:Number(raw.wins)||0,losses:Number(raw.losses)||0,
+    lastTradePnlSol:raw.lastTradePnlSol??null,lastTradeReturnPct:raw.lastTradeReturnPct??null,
   };
 }
 async function saveState(r:Redis,s:RealState){ await r.set(STATE_KEY,s); }
@@ -114,7 +124,9 @@ export async function POST(req:NextRequest){
       const fraction=Math.min(.5,Math.max(.05,Number(process.env.REAL_BUY_FRACTION??DEFAULT_BUY_FRACTION)));
       const amountSol=Math.min(Math.max(0,wallet.balanceSol-reserve),wallet.balanceSol*fraction);
       if(amountSol<=.0005){ const s={...state,stopped:true,lastAction:"INSUFFICIENT BALANCE",lastError:"Saldo insuficiente para otra entrada + fees."}; await saveState(r,s); return NextResponse.json({ok:false,error:s.lastError,state:s},{status:409}); }
+      const balanceBeforeBuySol=wallet.sol;
       const sig=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"buy",mint,amount:amountSol,denominatedInSol:"true"}));
+      const walletAfterBuy=await walletSnapshot(c,k);
       const nextEntries=state.entries+1;
       const entryMc=Number(body?.entryMarketCapSol);
       const s:RealState={
@@ -129,6 +141,7 @@ export async function POST(req:NextRequest){
         openName:typeof body?.name==="string"?body.name:null,
         openSymbol:typeof body?.symbol==="string"?body.symbol:null,
         openOpenedAt:Date.now(),
+        openBalanceBeforeBuySol:balanceBeforeBuySol,openBalanceAfterBuySol:walletAfterBuy.sol,
         lastAction:`BUY ${mint.slice(0,6)}… ${amountSol.toFixed(6)} SOL`,
         lastSignature:sig,lastError:null,startedAt:state.startedAt??Date.now()
       };
@@ -137,14 +150,23 @@ export async function POST(req:NextRequest){
     if(action==="sell"){
       if(state.openMint!==mint) return NextResponse.json({ok:false,error:"Ese mint no es la posición real abierta."},{status:409});
       const sig=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"sell",mint,amount:"100%",denominatedInSol:"false"}));
+      const walletAfterSell=await walletSnapshot(c,k);
       const reachedMax=state.entries>=MAX_ENTRIES;
+      const before=Number(state.openBalanceBeforeBuySol);
+      const afterBuy=Number(state.openBalanceAfterBuySol);
+      const pnl=Number.isFinite(before)?walletAfterSell.sol-before:0;
+      const spent=Number.isFinite(before)&&Number.isFinite(afterBuy)?Math.max(0,before-afterBuy):0;
+      const tradeRet=spent>0?(pnl/spent)*100:null;
+      const realized=(Number(state.realizedPnlSol)||0)+pnl;
+      const wins=(Number(state.wins)||0)+(pnl>0?1:0), losses=(Number(state.losses)||0)+(pnl<0?1:0);
       const s:RealState={
         ...state,openMint:null,openEntryMarketCapSol:null,openName:null,openSymbol:null,openOpenedAt:null,
+        openBalanceBeforeBuySol:null,openBalanceAfterBuySol:null,realizedPnlSol:realized,wins,losses,lastTradePnlSol:pnl,lastTradeReturnPct:tradeRet,
         armed:reachedMax?false:Boolean(state.armed),stopped:reachedMax,
-        lastAction:reachedMax?`SELL ${mint.slice(0,6)}… · MAX ${MAX_ENTRIES} COMPLETE`:`SELL ${mint.slice(0,6)}…`,
+        lastAction:`SELL ${mint.slice(0,6)}… · REAL ${pnl>=0?"+":""}${pnl.toFixed(6)} SOL${reachedMax?` · MAX ${MAX_ENTRIES} COMPLETE`:""}`,
         lastSignature:sig,lastError:null
       };
-      await saveState(r,s); return NextResponse.json({ok:true,state:s,signature:sig,wallet:await walletSnapshot(c,k)});
+      await saveState(r,s); return NextResponse.json({ok:true,state:s,signature:sig,wallet:walletAfterSell});
     }
     return NextResponse.json({ok:false,error:"Acción inválida"},{status:400});
   }catch(e){
