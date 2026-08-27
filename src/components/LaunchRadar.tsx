@@ -129,11 +129,46 @@ type PaperSniperPosition = {
 const SNIPER_NOTIONAL_USD = 10;
 const SNIPER_FRICTION_PCT = 3; // conservative paper estimate; NOT actual execution slippage
 const SNIPER_MAX_OPEN = 5; // anonymous PumpDev token-trade subscription pool
-const SNIPER_STORAGE_KEY = "memescope:paper-sniper:v20";
+const SNIPER_STORAGE_KEY = "memescope:paper-sniper:v20.3";
+
+// A paper result is only statistically valid after multiple POST-entry quotes
+// AND evidence that the observed price actually changed. This prevents a stale
+// provider quote from becoming a fake 0% trade that turns into -3% after friction.
+const MIN_VALID_PRICE_TICKS = 3;
+const MIN_DISTINCT_PRICE_LEVELS = 2;
+const MIN_OBSERVED_SPAN_MS = 1_500;
+const PRICE_DISTINCT_EPSILON_PCT = 0.05;
 
 function ret(entry: number, current: number) {
   return entry > 0 ? ((current / entry) - 1) * 100 : 0;
 }
+
+function priceTicks(position: PaperSniperPosition): SniperTick[] {
+  // Dex anchor ticks are deliberately excluded until evaluatePaperTick records
+  // a genuine post-anchor observation by incrementing observedPriceTicks.
+  return position.ticks.filter((t) => Number.isFinite(t.marketCapSol) && t.marketCapSol > 0);
+}
+
+function distinctObservedPrices(position: PaperSniperPosition): number {
+  const ticks = priceTicks(position);
+  const levels: number[] = [];
+  for (const tick of ticks) {
+    if (!levels.some((v) => Math.abs(ret(v, tick.marketCapSol)) <= PRICE_DISTINCT_EPSILON_PCT)) {
+      levels.push(tick.marketCapSol);
+    }
+  }
+  return levels.length;
+}
+
+function hasValidPaperData(position: PaperSniperPosition): boolean {
+  if ((position.observedPriceTicks ?? 0) < MIN_VALID_PRICE_TICKS) return false;
+  if (distinctObservedPrices(position) < MIN_DISTINCT_PRICE_LEVELS) return false;
+  const ticks = priceTicks(position);
+  if (ticks.length < 2) return false;
+  const span = ticks[ticks.length - 1].t - ticks[0].t;
+  return span >= MIN_OBSERVED_SPAN_MS;
+}
+
 function sniperExitLabel(reason: SniperExitReason | null) {
   const labels: Record<SniperExitReason, string> = {
     hard_stop: "HARD STOP", reversal: "REVERSAL", sell_pressure: "SELL PRESSURE",
@@ -203,9 +238,21 @@ export default function LaunchRadar() {
         // position is closed locally instead of pretending we observed its exit.
         const now = Date.now();
         const safe = parsed.map((raw) => {
-          const p = { ...raw, observedPriceTicks: raw.observedPriceTicks ?? raw.tradeCount ?? 0, validResult: raw.validResult ?? ((raw.tradeCount ?? 0) > 0) };
+          const p: PaperSniperPosition = {
+            ...raw,
+            observedPriceTicks: raw.observedPriceTicks ?? raw.tradeCount ?? 0,
+            validResult: false,
+          };
           if (p.status === "open" && now - p.openedAt > 2 * 60_000) {
-            return { ...p, status: "closed" as const, closedAt: now, exitReason: (p.observedPriceTicks > 0 ? "time_exit" : "no_data") as SniperExitReason, validResult: p.observedPriceTicks > 0, netReturnPct: p.observedPriceTicks > 0 ? p.grossReturnPct - SNIPER_FRICTION_PCT : 0 };
+            const valid = hasValidPaperData(p);
+            return {
+              ...p,
+              status: "closed" as const,
+              closedAt: now,
+              exitReason: (valid ? "time_exit" : "no_data") as SniperExitReason,
+              validResult: valid,
+              netReturnPct: valid ? p.grossReturnPct - SNIPER_FRICTION_PCT : 0,
+            };
           }
           return p;
         }).slice(0, 120);
@@ -229,10 +276,21 @@ export default function LaunchRadar() {
       if (p.mint !== mint || p.status !== "open") return p;
       const current = atMarketCap && atMarketCap > 0 ? atMarketCap : p.currentMarketCapSol;
       const gross = ret(p.entryMarketCapSol, current);
-      const hasData = (p.observedPriceTicks ?? 0) > 0;
-      const finalReason: SniperExitReason = reason === "time_exit" && !hasData ? "no_data" : reason;
+      const valid = hasValidPaperData(p);
+      // Manual close is also NO DATA when the tracker never established a valid
+      // market series. We refuse to turn provider failure into trading PnL.
+      const finalReason: SniperExitReason = valid ? reason : "no_data";
       closed = true;
-      return { ...p, status: "closed" as const, closedAt: now, currentMarketCapSol: current, grossReturnPct: gross, netReturnPct: finalReason === "no_data" ? 0 : gross - SNIPER_FRICTION_PCT, exitReason: finalReason, validResult: finalReason !== "no_data" };
+      return {
+        ...p,
+        status: "closed" as const,
+        closedAt: now,
+        currentMarketCapSol: current,
+        grossReturnPct: valid ? gross : 0,
+        netReturnPct: valid ? gross - SNIPER_FRICTION_PCT : 0,
+        exitReason: finalReason,
+        validResult: valid,
+      };
     });
     if (!closed) return;
     positionsRef.current = next;
@@ -252,17 +310,29 @@ export default function LaunchRadar() {
     const ageMs = now - position.openedAt;
 
     let reason: SniperExitReason | null = null;
-    if (gross <= -12) reason = "hard_stop";
-    else if (ageMs >= 2_000 && peakReturn >= 8) {
+    const nextObservedCount = (position.observedPriceTicks ?? 0) + 1;
+    const provisional: PaperSniperPosition = {
+      ...position,
+      currentMarketCapSol: marketCapSol,
+      ticks,
+      observedPriceTicks: nextObservedCount,
+    };
+    const enoughMarketData = hasValidPaperData(provisional);
+
+    // Before data quality is established the bot may TRACK the quote, but it
+    // cannot declare a win/loss/stop/reversal.
+    if (enoughMarketData && gross <= -12) reason = "hard_stop";
+    else if (enoughMarketData && ageMs >= 2_000 && peakReturn >= 8) {
       // Dynamic trailing: react faster once the token has already made a sharp move.
       const trail = peakReturn >= 100 ? -12 : peakReturn >= 50 ? -10 : peakReturn >= 20 ? -8 : -6;
       const sellPressure = sellCount >= 2 && sellCount > buyCount;
       const rapidDrop = recent.length >= 2 && ret(recent[0].marketCapSol, marketCapSol) <= -8;
       if (drawdown <= trail && (sellPressure || rapidDrop || peakReturn >= 50)) reason = "reversal";
     }
-    if (!reason && ageMs >= 4_000 && gross > 3 && sellCount >= 3 && sellCount >= buyCount * 2) reason = "sell_pressure";
-    if (!reason && ageMs >= 30_000 && peakReturn < 5 && gross <= 0) reason = "no_momentum";
-    if (!reason && ageMs >= 90_000) reason = "time_exit";
+    if (!reason && enoughMarketData && ageMs >= 4_000 && gross > 3 && sellCount >= 3 && sellCount >= buyCount * 2) reason = "sell_pressure";
+    if (!reason && enoughMarketData && ageMs >= 30_000 && peakReturn < 5 && gross <= 0) reason = "no_momentum";
+    // Time exit with insufficient data is handled by closePaper -> NO DATA.
+    if (!reason && enoughMarketData && ageMs >= 90_000) reason = "time_exit";
 
     const updated: PaperSniperPosition = {
       ...position, currentMarketCapSol: marketCapSol, peakMarketCapSol: peak,
@@ -418,10 +488,19 @@ export default function LaunchRadar() {
               if (!mc || mc <= 0) return;
               const side: SniperTick["side"] = msg.txType === "buy" ? "buy" : "sell";
               const { updated, reason } = evaluatePaperTick(current, mc, side, Date.now());
-              const next = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? (reason ? { ...updated, status: "closed" as const, closedAt: Date.now(), exitReason: reason, netReturnPct: updated.grossReturnPct - SNIPER_FRICTION_PCT, validResult: true } : updated) : p);
-              positionsRef.current = next;
-              setSniperPositions(next);
-              if (reason) ws?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
+              if (reason) {
+                // Store the latest validated tick first, then route ALL closure
+                // through closePaper so one code path decides validity/PnL.
+                const staged = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
+                positionsRef.current = staged;
+                setSniperPositions(staged);
+                closePaper(mint, reason, mc);
+                try { ws?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
+              } else {
+                const next = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
+                positionsRef.current = next;
+                setSniperPositions(next);
+              }
             }
           } catch (error) {
             setStreamError(`${provider.name}: mensaje no válido`);
@@ -483,10 +562,17 @@ export default function LaunchRadar() {
       if (!mc || mc <= 0) return;
       const side: SniperTick["side"] = msg.txType === "buy" ? "buy" : "sell";
       const { updated, reason } = evaluatePaperTick(current, mc, side, Date.now());
-      const next = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? (reason ? { ...updated, status: "closed" as const, closedAt: Date.now(), exitReason: reason, netReturnPct: updated.grossReturnPct - SNIPER_FRICTION_PCT, validResult: true } : updated) : p);
-      positionsRef.current = next;
-      setSniperPositions(next);
-      if (reason) { try { socket?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {} }
+      if (reason) {
+        const staged = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
+        positionsRef.current = staged;
+        setSniperPositions(staged);
+        closePaper(mint, reason, mc);
+        try { socket?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
+      } else {
+        const next = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
+        positionsRef.current = next;
+        setSniperPositions(next);
+      }
     };
 
     const connectTrades = () => {
@@ -567,7 +653,18 @@ export default function LaunchRadar() {
             continue;
           }
           const evaluated = evaluatePaperTick(base, relativeMc, "other", now);
-          next[idx] = evaluated.reason ? { ...evaluated.updated, status: "closed" as const, closedAt: now, exitReason: evaluated.reason, netReturnPct: evaluated.updated.grossReturnPct - SNIPER_FRICTION_PCT, validResult: true } : evaluated.updated;
+          if (evaluated.reason && hasValidPaperData(evaluated.updated)) {
+            next[idx] = {
+              ...evaluated.updated,
+              status: "closed" as const,
+              closedAt: now,
+              exitReason: evaluated.reason,
+              netReturnPct: evaluated.updated.grossReturnPct - SNIPER_FRICTION_PCT,
+              validResult: true,
+            };
+          } else {
+            next[idx] = evaluated.updated;
+          }
           changed = true;
         }
         if (changed) {
@@ -610,7 +707,14 @@ export default function LaunchRadar() {
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div><h3 className="font-display text-base font-semibold">🤖 Auto Paper Sniper</h3><p className="text-[10px] text-[var(--text-faint)]">$10 virtuales · máximo 5 posiciones · usa trades en tiempo real cuando PumpDev está disponible; si no, activa monitor de precio DexScreener. Cero wallet, cero SOL.</p></div>
-        <button onClick={() => setAutoPaper((v) => !v)} className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${autoPaper ? "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]" : "border-[var(--border)] text-[var(--text-muted)]"}`}>{autoPaper ? "● AUTO PAPER ON" : "○ AUTO PAPER OFF"}</button>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => setAutoPaper((v) => !v)} className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${autoPaper ? "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]" : "border-[var(--border)] text-[var(--text-muted)]"}`}>{autoPaper ? "● AUTO PAPER ON" : "○ AUTO PAPER OFF"}</button>
+          <button onClick={() => {
+            positionsRef.current = [];
+            setSniperPositions([]);
+            try { window.localStorage.removeItem(SNIPER_STORAGE_KEY); } catch {}
+          }} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--text-muted)]">🗑 Reset paper</button>
+        </div>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">Abiertas</div><b className="font-data text-lg">{sniperOpen.length}/{SNIPER_MAX_OPEN}</b></div>
@@ -618,13 +722,13 @@ export default function LaunchRadar() {
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">Win rate</div><b className="font-data text-lg">{sniperValid.length ? `${((sniperWins / sniperValid.length) * 100).toFixed(0)}%` : "N/D"}</b></div>
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">PnL virtual</div><b className={`font-data text-lg ${sniperPnlUsd >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}`}>{sniperPnlUsd >= 0 ? "+" : ""}${sniperPnlUsd.toFixed(2)}</b></div>
       </div>
-      <div className="text-[10px] text-[var(--text-muted)]">Salida dinámica: hard stop −12%; trailing de ~6–12% desde el máximo; reversión; sell pressure cuando hay stream de trades; no-momentum; máximo 90s. Si aparece “PumpPortal fallback”, el bot reintenta PumpDev para trades y usa DexScreener como último respaldo. Una operación sin precios posteriores se marca NO DATA y NO cuenta como pérdida. El 3% de fricción se descuenta solo al cerrar un resultado válido.</div>
+      <div className="text-[10px] text-[var(--text-muted)]">Salida dinámica: hard stop −12%; trailing de ~6–12% desde el máximo; reversión; sell pressure cuando hay stream de trades; no-momentum; máximo 90s. Si aparece “PumpPortal fallback”, el bot reintenta PumpDev para trades y usa DexScreener como último respaldo. Una operación necesita ≥3 cotizaciones posteriores, ≥2 niveles de precio distintos y separación temporal real para ser VÁLIDA. Si no, acaba en NO DATA y no toca PnL/win rate. El 3% de fricción solo se descuenta a resultados válidos.</div>
       {sniperOpen.length > 0 && <div className="grid lg:grid-cols-2 gap-2">{sniperOpen.map((p) => <div key={p.mint} className="rounded-xl border border-[var(--accent-info)]/30 bg-[var(--surface-2)] p-3">
-        <div className="flex justify-between gap-2"><div><b>{p.name}</b> <span className="text-[var(--text-muted)]">${p.symbol}</span><div className="text-[9px] text-[var(--text-faint)]">PAPER · {Math.max(0, Math.floor((clock - p.openedAt)/1000))}s · {(p.observedPriceTicks ?? 0) === 0 ? "esperando precio real…" : `${p.tradeCount} updates`}</div></div><div className={`font-data font-bold ${p.netReturnPct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}`}>{(p.observedPriceTicks ?? 0) === 0 ? "WAIT" : pctText(p.grossReturnPct)}</div></div>
+        <div className="flex justify-between gap-2"><div><b>{p.name}</b> <span className="text-[var(--text-muted)]">${p.symbol}</span><div className="text-[9px] text-[var(--text-faint)]">PAPER · {Math.max(0, Math.floor((clock - p.openedAt)/1000))}s · {!hasValidPaperData(p) ? `validando datos ${Math.min(p.observedPriceTicks ?? 0, MIN_VALID_PRICE_TICKS)}/${MIN_VALID_PRICE_TICKS}…` : `${p.tradeCount} updates válidos`}</div></div><div className={`font-data font-bold ${p.netReturnPct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}`}>{!hasValidPaperData(p) ? "WAIT" : pctText(p.grossReturnPct)}</div></div>
         <div className="mt-2 grid grid-cols-3 gap-1 text-[10px]"><div>Peak <b className="text-[var(--accent-opportunity)]">{pctText(p.peakReturnPct)}</b></div><div>From peak <b className={p.drawdownFromPeakPct < 0 ? "text-[var(--accent-risk)]" : ""}>{pctText(p.drawdownFromPeakPct)}</b></div><div>B/S <b>{p.buys}/{p.sells}</b></div></div>
         <button onClick={() => closePaper(p.mint, "manual")} className="mt-2 rounded border border-[var(--border)] px-2 py-1 text-[10px] text-[var(--text-muted)]">Cerrar paper ahora</button>
       </div>)}</div>}
-      {sniperClosed.length > 0 && <details><summary className="cursor-pointer text-xs text-[var(--text-muted)]">Últimas salidas ({Math.min(sniperClosed.length, 20)})</summary><div className="mt-2 space-y-1">{sniperClosed.slice(0,20).map((p) => <div key={`${p.mint}-${p.openedAt}`} className="flex flex-wrap justify-between gap-2 rounded bg-[var(--surface-2)] px-2 py-1.5 text-[10px]"><span><b>${p.symbol}</b> · {sniperExitLabel(p.exitReason)} · peak {pctText(p.peakReturnPct)}</span><b className={p.netReturnPct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}>{pctText(p.netReturnPct)}</b></div>)}</div></details>}
+      {sniperClosed.length > 0 && <details><summary className="cursor-pointer text-xs text-[var(--text-muted)]">Últimas salidas ({Math.min(sniperClosed.length, 20)})</summary><div className="mt-2 space-y-1">{sniperClosed.slice(0,20).map((p) => <div key={`${p.mint}-${p.openedAt}`} className="flex flex-wrap justify-between gap-2 rounded bg-[var(--surface-2)] px-2 py-1.5 text-[10px]"><span><b>${p.symbol}</b> · {sniperExitLabel(p.exitReason)} · peak {pctText(p.peakReturnPct)}</span><b className={p.exitReason === "no_data" ? "text-[var(--text-muted)]" : p.netReturnPct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}>{p.exitReason === "no_data" ? "N/D" : pctText(p.netReturnPct)}</b></div>)}</div></details>}
     </div>
 
     <div className="space-y-2">
