@@ -11,8 +11,25 @@ const DEFAULT_BUY_FRACTION = 0.25;
 const DEFAULT_SLIPPAGE = 10;
 const DEFAULT_PRIORITY_FEE = 0.00005;
 
-type RealState = { entries:number; openMint:string|null; stopped:boolean; lastAction:string|null; lastSignature:string|null; lastError:string|null; startedAt:number|null };
-const emptyState=():RealState=>({entries:0,openMint:null,stopped:false,lastAction:null,lastSignature:null,lastError:null,startedAt:null});
+type RealState = {
+  entries:number;
+  openMint:string|null;
+  stopped:boolean;
+  armed?:boolean;
+  openEntryMarketCapSol?:number|null;
+  openName?:string|null;
+  openSymbol?:string|null;
+  openOpenedAt?:number|null;
+  lastAction:string|null;
+  lastSignature:string|null;
+  lastError:string|null;
+  startedAt:number|null;
+};
+const emptyState=():RealState=>({
+  entries:0,openMint:null,stopped:false,armed:false,
+  openEntryMarketCapSol:null,openName:null,openSymbol:null,openOpenedAt:null,
+  lastAction:null,lastSignature:null,lastError:null,startedAt:null
+});
 
 function redisClient(){
   const url=process.env.KV_REST_API_URL??process.env.UPSTASH_REDIS_REST_URL;
@@ -28,7 +45,18 @@ function parseKeypair(){
 }
 function rpcUrl(){ return process.env.SOLANA_RPC_URL?.trim()||"https://api.mainnet-beta.solana.com"; }
 function authorized(req:NextRequest){ const x=process.env.REAL_CONTROL_TOKEN?.trim(); return Boolean(x&&req.headers.get("x-real-control-token")===x); }
-async function getState(r:Redis){ return (await r.get<RealState>(STATE_KEY))??emptyState(); }
+async function getState(r:Redis){
+  const raw=(await r.get<RealState>(STATE_KEY))??emptyState();
+  return {
+    ...emptyState(),
+    ...raw,
+    armed:Boolean(raw.armed),
+    openEntryMarketCapSol:raw.openEntryMarketCapSol??null,
+    openName:raw.openName??null,
+    openSymbol:raw.openSymbol??null,
+    openOpenedAt:raw.openOpenedAt??null,
+  };
+}
 async function saveState(r:Redis,s:RealState){ await r.set(STATE_KEY,s); }
 async function walletSnapshot(c:Connection,k:Keypair){ const l=await c.getBalance(k.publicKey,"confirmed"); return {publicKey:k.publicKey.toBase58(),balanceSol:l/1e9}; }
 async function portalTx(a:{publicKey:string;action:"buy"|"sell";mint:string;amount:number|string;denominatedInSol:"true"|"false"}){
@@ -56,13 +84,30 @@ export async function POST(req:NextRequest){
   try{
     const body=await req.json(), action=String(body?.action??""), mint=String(body?.mint??"");
     const r=redisClient(), state=await getState(r);
-    if(action==="reset"){ const s=emptyState(); await saveState(r,s); return NextResponse.json({ok:true,state:s}); }
-    if(action==="stop"){ const s={...state,stopped:true,lastAction:"KILL SWITCH"}; await saveState(r,s); return NextResponse.json({ok:true,state:s}); }
+    if(action==="reset"){
+      if(state.openMint) return NextResponse.json({ok:false,error:"No se puede resetear mientras exista una posición real abierta. Véndela primero."},{status:409});
+      const s=emptyState(); await saveState(r,s); return NextResponse.json({ok:true,state:s});
+    }
+    if(action==="arm"){
+      if(state.stopped) return NextResponse.json({ok:false,error:"REAL TEST detenido. Revisa el motivo antes de rearmar."},{status:409});
+      const s={...state,armed:true,lastAction:"REAL TEST ARMED",lastError:null};
+      await saveState(r,s); return NextResponse.json({ok:true,state:s});
+    }
+    if(action==="disarm"){
+      const s={...state,armed:false,lastAction:"REAL TEST DISARMED"};
+      await saveState(r,s); return NextResponse.json({ok:true,state:s});
+    }
+    if(action==="stop"){
+      // Kill switch blocks NEW buys but intentionally keeps the current mint
+      // so SELL remains possible. A kill switch must never trap an open token.
+      const s={...state,stopped:true,armed:false,lastAction:"KILL SWITCH"};
+      await saveState(r,s); return NextResponse.json({ok:true,state:s});
+    }
     if(!mint||mint.length<30) return NextResponse.json({ok:false,error:"Mint inválido"},{status:400});
-    if(state.stopped) return NextResponse.json({ok:false,error:"REAL TEST detenido."},{status:409});
     const k=parseKeypair(), c=new Connection(rpcUrl(),"confirmed"), wallet=await walletSnapshot(c,k);
 
     if(action==="buy"){
+      if(state.stopped||!state.armed) return NextResponse.json({ok:false,error:"REAL TEST no está armado para nuevas compras."},{status:409});
       if(state.entries>=MAX_ENTRIES){ const s={...state,stopped:true,lastAction:"MAX 20 ENTRIES"}; await saveState(r,s); return NextResponse.json({ok:false,error:"Máximo de 20 entradas alcanzado.",state:s},{status:409}); }
       if(state.openMint) return NextResponse.json({ok:false,error:"Ya existe una posición real abierta."},{status:409});
       const reserve=Number(process.env.REAL_RESERVE_SOL??DEFAULT_RESERVE_SOL);
@@ -70,13 +115,35 @@ export async function POST(req:NextRequest){
       const amountSol=Math.min(Math.max(0,wallet.balanceSol-reserve),wallet.balanceSol*fraction);
       if(amountSol<=.0005){ const s={...state,stopped:true,lastAction:"INSUFFICIENT BALANCE",lastError:"Saldo insuficiente para otra entrada + fees."}; await saveState(r,s); return NextResponse.json({ok:false,error:s.lastError,state:s},{status:409}); }
       const sig=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"buy",mint,amount:amountSol,denominatedInSol:"true"}));
-      const s:RealState={...state,entries:state.entries+1,openMint:mint,stopped:state.entries+1>=MAX_ENTRIES,lastAction:`BUY ${mint.slice(0,6)}… ${amountSol.toFixed(6)} SOL`,lastSignature:sig,lastError:null,startedAt:state.startedAt??Date.now()};
+      const nextEntries=state.entries+1;
+      const entryMc=Number(body?.entryMarketCapSol);
+      const s:RealState={
+        ...state,
+        entries:nextEntries,
+        openMint:mint,
+        // At entry 20 we disarm NEW buys, but do not set stopped until the
+        // open token is sold. This guarantees the final position can exit.
+        armed:nextEntries<MAX_ENTRIES,
+        stopped:false,
+        openEntryMarketCapSol:Number.isFinite(entryMc)&&entryMc>0?entryMc:null,
+        openName:typeof body?.name==="string"?body.name:null,
+        openSymbol:typeof body?.symbol==="string"?body.symbol:null,
+        openOpenedAt:Date.now(),
+        lastAction:`BUY ${mint.slice(0,6)}… ${amountSol.toFixed(6)} SOL`,
+        lastSignature:sig,lastError:null,startedAt:state.startedAt??Date.now()
+      };
       await saveState(r,s); return NextResponse.json({ok:true,state:s,signature:sig,amountSol,wallet:await walletSnapshot(c,k)});
     }
     if(action==="sell"){
       if(state.openMint!==mint) return NextResponse.json({ok:false,error:"Ese mint no es la posición real abierta."},{status:409});
       const sig=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"sell",mint,amount:"100%",denominatedInSol:"false"}));
-      const s:RealState={...state,openMint:null,lastAction:`SELL ${mint.slice(0,6)}…`,lastSignature:sig,lastError:null};
+      const reachedMax=state.entries>=MAX_ENTRIES;
+      const s:RealState={
+        ...state,openMint:null,openEntryMarketCapSol:null,openName:null,openSymbol:null,openOpenedAt:null,
+        armed:reachedMax?false:Boolean(state.armed),stopped:reachedMax,
+        lastAction:reachedMax?`SELL ${mint.slice(0,6)}… · MAX ${MAX_ENTRIES} COMPLETE`:`SELL ${mint.slice(0,6)}…`,
+        lastSignature:sig,lastError:null
+      };
       await saveState(r,s); return NextResponse.json({ok:true,state:s,signature:sig,wallet:await walletSnapshot(c,k)});
     }
     return NextResponse.json({ok:false,error:"Acción inválida"},{status:400});

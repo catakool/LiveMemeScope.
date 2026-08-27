@@ -253,6 +253,7 @@ export default function LaunchRadar() {
   const [realBusy, setRealBusy] = useState(false);
   const [realError, setRealError] = useState<string | null>(null);
   const realArmedRef = useRef(false);
+  const realBusyRef = useRef(false);
   const realTokenRef = useRef("");
   const realOpenMintRef = useRef<string | null>(null);
   const positionsRef = useRef<PaperSniperPosition[]>([]);
@@ -295,6 +296,7 @@ export default function LaunchRadar() {
   useEffect(() => { autoPaperRef.current = autoPaper; }, [autoPaper]);
 
   useEffect(() => { realArmedRef.current = realArmed; }, [realArmed]);
+  useEffect(() => { realBusyRef.current = realBusy; }, [realBusy]);
   useEffect(() => { realTokenRef.current = realToken; }, [realToken]);
 
   const realRequest = async (method: "GET" | "POST", body?: any) => {
@@ -310,30 +312,89 @@ export default function LaunchRadar() {
     if (!response.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${response.status}`);
     setRealStatus(data);
     realOpenMintRef.current = data?.state?.openMint ?? null;
+    if (typeof data?.state?.armed === "boolean") {
+      realArmedRef.current = data.state.armed;
+      setRealArmed(data.state.armed);
+    }
     return data;
   };
 
-  const refreshRealStatus = async () => {
-    try { setRealError(null); await realRequest("GET"); }
-    catch (e) { setRealError(e instanceof Error ? e.message : "Error REAL TEST"); }
+  const recoverRealPosition = async (state: any) => {
+    const mint = typeof state?.openMint === "string" ? state.openMint : "";
+    if (!mint || positionsRef.current.some((p) => p.mint === mint && p.status === "open")) return;
+
+    const mc = Number(state?.openEntryMarketCapSol);
+    if (!(mc > 0)) {
+      // Positions bought by the original V22 did not persist the entry MC.
+      // Never mix a Dex USD market cap with PumpDev's SOL marketCapSol: that can
+      // manufacture gigantic returns. The existing legacy position is therefore
+      // recovery-manual only; the UI exposes SELL OPEN POSITION NOW.
+      setRealError("Posición heredada de V22 sin entry price persistido. Para esta posición antigua usa SELL OPEN POSITION NOW; las siguientes ya se recuperan automáticamente.");
+      return;
+    }
+
+    const recovered: PaperSniperPosition = {
+      mint,
+      name: state?.openName || "REAL POSITION RECOVERY",
+      symbol: state?.openSymbol || "REAL",
+      openedAt: Number(state?.openOpenedAt) > 0 ? Number(state.openOpenedAt) : Date.now(),
+      closedAt:null,status:"open",entryMarketCapSol:mc,currentMarketCapSol:mc,peakMarketCapSol:mc,troughMarketCapSol:mc,
+      grossReturnPct:0,netReturnPct:0,peakReturnPct:0,drawdownFromPeakPct:0,exitReason:null,
+      tradeCount:0,buys:0,sells:0,ticks:[],observedPriceTicks:0,validResult:false,
+    };
+    const next=[recovered,...positionsRef.current].slice(0,120);
+    positionsRef.current=next;
+    setSniperPositions(next);
+
+    // Re-subscribe immediately after a refresh/reconnect instead of waiting for
+    // another token creation event.
+    try {
+      if (streamSource === "pumpdev" && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ method:"subscribeTokenTrade", keys:[mint] }));
+      } else if (tradeWsRef.current?.readyState === WebSocket.OPEN) {
+        tradeWsRef.current.send(JSON.stringify({ method:"subscribeTokenTrade", keys:[mint] }));
+      }
+    } catch {}
   };
 
-  const realBuyIfArmed = async (mint: string) => {
-    if (!realArmedRef.current || realBusy || realOpenMintRef.current) return;
+  const refreshRealStatus = async () => {
     try {
-      setRealBusy(true); setRealError(null);
-      const data = await realRequest("POST", { action: "buy", mint });
+      setRealError(null);
+      const data=await realRequest("GET");
+      if (data?.state?.openMint) await recoverRealPosition(data.state);
+    } catch (e) { setRealError(e instanceof Error ? e.message : "Error REAL TEST"); }
+  };
+
+  const realBuyIfArmed = async (mint: string, entryMarketCapSol?: number | null, name?: string, symbol?: string) => {
+    // realBusyRef is intentionally synchronous. The old React state closure could
+    // launch two BUY requests from two create events arriving milliseconds apart;
+    // the second 409 then disarmed a perfectly healthy bot.
+    if (!realArmedRef.current || realBusyRef.current || realOpenMintRef.current) return;
+    realBusyRef.current = true;
+    setRealBusy(true);
+    try {
+      setRealError(null);
+      const data = await realRequest("POST", { action: "buy", mint, entryMarketCapSol, name, symbol });
       realOpenMintRef.current = data?.state?.openMint ?? mint;
-      if (data?.state?.stopped) setRealArmed(false);
+      if (data?.state?.stopped || data?.state?.armed === false) {
+        realArmedRef.current=false;
+        setRealArmed(false);
+      }
     } catch (e) {
       setRealError(e instanceof Error ? e.message : "BUY real falló");
-      setRealArmed(false); // fail closed
-    } finally { setRealBusy(false); }
+      // Fail closed only for a genuine execution/config error.
+      realArmedRef.current=false;
+      setRealArmed(false);
+    } finally {
+      realBusyRef.current=false;
+      setRealBusy(false);
+    }
   };
 
   const realSellIfOpen = async (mint: string, reason: string) => {
     if (realOpenMintRef.current !== mint) return;
     try {
+      realBusyRef.current=true;
       setRealBusy(true); setRealError(null);
       const data = await realRequest("POST", { action: "sell", mint, reason });
       realOpenMintRef.current = data?.state?.openMint ?? null;
@@ -341,7 +402,10 @@ export default function LaunchRadar() {
     } catch (e) {
       setRealError(`SELL REAL requiere atención: ${e instanceof Error ? e.message : "error"}`);
       setRealArmed(false); // stop new buys; do not hide failed exit
-    } finally { setRealBusy(false); }
+    } finally {
+      realBusyRef.current=false;
+      setRealBusy(false);
+    }
   };
 
   useEffect(() => {
@@ -562,7 +626,7 @@ export default function LaunchRadar() {
                 setSniperPositions(next);
                 // REAL TEST mirrors only the first paper position while armed.
                 // Server enforces 1 open position + 20-entry hard cap.
-                void realBuyIfArmed(mint);
+                void realBuyIfArmed(mint, mc, token.name, token.symbol);
                 if (provider.supportsTrades) {
                   ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
                 } else if (tradeWsRef.current?.readyState === WebSocket.OPEN) {
@@ -815,7 +879,13 @@ export default function LaunchRadar() {
       <div className="grid md:grid-cols-[1fr_auto_auto] gap-2">
         <input type="password" value={realToken} onChange={(e)=>setRealToken(e.target.value)} placeholder="REAL CONTROL TOKEN (no es tu seed)" className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-xs outline-none" />
         <button onClick={refreshRealStatus} className="rounded-lg border border-[var(--border)] px-3 py-2 text-xs">Comprobar wallet</button>
-        <button disabled={!realStatus?.ok || realStatus?.state?.stopped || realBusy} onClick={()=>setRealArmed(v=>!v)} className={`rounded-lg border px-3 py-2 text-xs font-bold ${realArmed ? "border-[var(--accent-risk)] text-[var(--accent-risk)]" : "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]"} disabled:opacity-40`}>{realArmed ? "DESARMAR" : "ARM REAL TEST"}</button>
+        <button disabled={!realStatus?.ok || realStatus?.state?.stopped || realBusy} onClick={async()=>{
+          try{
+            const data=await realRequest("POST",{action:realArmed?"disarm":"arm"});
+            const armed=Boolean(data?.state?.armed);
+            realArmedRef.current=armed; setRealArmed(armed);
+          }catch(e){setRealError(e instanceof Error?e.message:"No se pudo cambiar ARMED");}
+        }} className={`rounded-lg border px-3 py-2 text-xs font-bold ${realArmed ? "border-[var(--accent-risk)] text-[var(--accent-risk)]" : "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]"} disabled:opacity-40`}>{realArmed ? "DESARMAR" : "ARM REAL TEST"}</button>
       </div>
       {realStatus?.ok && <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[10px]">
         <div className="rounded bg-[var(--surface-2)] p-2">Wallet<div className="font-data">{realStatus.wallet?.publicKey?.slice(0,6)}…{realStatus.wallet?.publicKey?.slice(-4)}</div></div>
@@ -825,13 +895,18 @@ export default function LaunchRadar() {
         <div className="rounded bg-[var(--surface-2)] p-2">Compra/entrada<div className="font-data">{Math.round(Number(realStatus.buyFraction ?? .25)*100)}% saldo</div></div>
       </div>}
       <div className="flex flex-wrap gap-2">
-        <button onClick={async()=>{ try{ await realRequest("POST",{action:"stop"}); setRealArmed(false); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--accent-risk)] px-3 py-1.5 text-xs font-bold text-[var(--accent-risk)]">■ KILL SWITCH</button>
+        <button onClick={async()=>{ try{ const data=await realRequest("POST",{action:"stop"}); realArmedRef.current=false; setRealArmed(false); setRealStatus(data); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--accent-risk)] px-3 py-1.5 text-xs font-bold text-[var(--accent-risk)]">■ KILL SWITCH</button>
+        {realStatus?.state?.openMint && <button disabled={realBusy} onClick={async()=>{
+          if(!confirm("Vender AHORA el 100% de la posición real abierta?")) return;
+          await realSellIfOpen(String(realStatus.state.openMint),"manual_recovery");
+          await refreshRealStatus();
+        }} className="rounded-lg border border-[var(--accent-gold)]/60 px-3 py-1.5 text-xs font-bold text-[var(--accent-gold)] disabled:opacity-40">⚠ SELL OPEN POSITION NOW</button>}
         <button onClick={async()=>{ if(!confirm("¿Resetear contador REAL TEST? Hazlo solo antes de una prueba nueva.")) return; try{ await realRequest("POST",{action:"reset"}); setRealArmed(false); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--text-muted)]">Reset contador</button>
         {realStatus?.state?.lastSignature && <a className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs" target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${realStatus.state.lastSignature}`}>Última TX ↗</a>}
       </div>
       {realStatus?.state?.lastAction && <div className="text-[10px] text-[var(--text-muted)]">Última acción: <b>{realStatus.state.lastAction}</b></div>}
       {(realError || realStatus?.state?.lastError) && <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk)]/5 p-2 text-[10px] text-[var(--accent-risk)]">{realError ?? realStatus.state.lastError}</div>}
-      <div className="text-[9px] text-[var(--text-faint)]">Fail-closed: cualquier error de BUY/SELL desarma nuevas entradas. La private key nunca se envía al navegador; debe existir solo como Secret Environment Variable del deployment. Este modo usa PumpPortal Local Transaction API y preflight habilitado.</div>
+      <div className="text-[9px] text-[var(--text-faint)]">V22.1: ARMED queda persistido en Redis, una posición abierta se recupera tras refrescar la página y SELL sigue permitido aunque el Kill Switch esté activo. La private key nunca se envía al navegador. `priorityFee` por defecto = 0.00005 SOL; Solscan puede abreviar los ceros con subíndices.</div>
     </div>
 
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">
