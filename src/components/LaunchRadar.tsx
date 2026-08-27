@@ -143,13 +143,17 @@ const PRICE_DISTINCT_EPSILON_PCT = 0.05;
 // earlier than V25 so it does not systematically arrive after the first impulse.
 // These values are deliberately conservative enough to reject a token that has
 // already gone vertical before our transaction can land.
-const REAL_ENTRY_MIN_AGE_MS = 1_500;
-const REAL_ENTRY_MAX_AGE_MS = 12_000;
-const REAL_ENTRY_MIN_RETURN_PCT = 0.6;
+const REAL_ENTRY_MIN_AGE_MS = 1_200;
+const REAL_ENTRY_MAX_AGE_LIVE_MS = 15_000;
+// DexScreener can index a newborn token only after V26.1's old 12-second
+// birth-age window had already expired. Fallback mode therefore measures
+// eligibility from the first usable observed quote.
+const REAL_ENTRY_MAX_OBSERVED_AGE_FALLBACK_MS = 45_000;
+const REAL_ENTRY_MIN_RETURN_PCT = 0.35;
 const REAL_ENTRY_MAX_RETURN_PCT = 18;
-const REAL_ENTRY_MIN_RECENT_MOVE_PCT = 0.6;
-const REAL_ENTRY_MIN_BUY_RATIO = 0.60;
-const REAL_ENTRY_MAX_DRAWDOWN_PCT = -2.5;
+const REAL_ENTRY_MIN_RECENT_MOVE_PCT = 0.35;
+const REAL_ENTRY_MIN_BUY_RATIO = 0.58;
+const REAL_ENTRY_MAX_DRAWDOWN_PCT = -4.0;
 
 function ret(entry: number, current: number) {
   return entry > 0 ? ((current / entry) - 1) * 100 : 0;
@@ -271,6 +275,9 @@ export default function LaunchRadar() {
   const realOpenMintRef = useRef<string | null>(null);
   const realExitPendingRef = useRef(false);
   const realExitReasonRef = useRef("autonomous_recovery");
+  const [entryEngineStatus, setEntryEngineStatus] = useState("ARMED: aguardando candidato");
+  const entryEvaluationsRef = useRef(0);
+  const entryQualifiedRef = useRef(0);
   const realExitMarketCapRef = useRef<number | null>(null);
   const realMirrorRef = useRef<PaperSniperPosition | null>(null);
   const positionsRef = useRef<PaperSniperPosition[]>([]);
@@ -468,7 +475,10 @@ export default function LaunchRadar() {
       setRealError(null);
       const data = await realRequest("POST", { action: "buy", mint, entryMarketCapSol, name, symbol });
       realOpenMintRef.current = data?.state?.openMint ?? mint;
-      if (data?.state?.openMint) seedRealMirror(data.state);
+      if (data?.state?.openMint) {
+        seedRealMirror(data.state);
+        setEntryEngineStatus(`FILLED ${symbol || mint.slice(0,6)}: posição REAL aberta`);
+      }
       if (data?.state?.stopped || data?.state?.armed === false) {
         realArmedRef.current=false;
         setRealArmed(false);
@@ -481,6 +491,7 @@ export default function LaunchRadar() {
         // The token ran away before execution. Do NOT chase it and do NOT stop
         // the experiment: skip this mint and wait for the next launch.
         setRealError("SKIP TOKEN · preflight/custo/slippage não passou. Bot continua ARMED.");
+        setEntryEngineStatus(`SKIP ${symbol || mint.slice(0,6)}: preflight/execution`);
       } else {
         setRealError(message);
         // Unknown execution/config errors still fail closed.
@@ -494,26 +505,90 @@ export default function LaunchRadar() {
   };
 
   const maybeEnterReal = (p: PaperSniperPosition) => {
-    if (!realArmedRef.current || realBusyRef.current || realOpenMintRef.current) return;
-    if (!hasValidPaperData(p)) return;
-    const ageMs = Date.now() - p.openedAt;
-    const ticks = p.ticks.slice(-5);
-    if (ticks.length < 3) return;
-    const recentMove = ret(ticks[Math.max(0, ticks.length - 3)].marketCapSol, p.currentMarketCapSol);
+    if (!realArmedRef.current) {
+      setEntryEngineStatus("OFF: REAL não está ARMED");
+      return;
+    }
+    if (realBusyRef.current) {
+      setEntryEngineStatus("WAIT: execução REAL ocupada");
+      return;
+    }
+    if (realOpenMintRef.current) {
+      setEntryEngineStatus("WAIT: já existe posição REAL");
+      return;
+    }
+
+    entryEvaluationsRef.current += 1;
+
+    if (!hasValidPaperData(p)) {
+      setEntryEngineStatus(`TRACK ${p.symbol}: dados ${Math.min(p.observedPriceTicks ?? 0, MIN_VALID_PRICE_TICKS)}/${MIN_VALID_PRICE_TICKS}`);
+      return;
+    }
+
+    const now = Date.now();
+    const birthAgeMs = now - p.openedAt;
+    const ticks = p.ticks.slice(-8);
+    if (ticks.length < 3) {
+      setEntryEngineStatus(`TRACK ${p.symbol}: poucas cotações`);
+      return;
+    }
+
     const directionalTrades = p.buys + p.sells;
+    const hasLiveTradeFlow = directionalTrades > 0;
+    const firstObservedAt = ticks[0]?.t ?? p.openedAt;
+    const observedAgeMs = Math.max(0, now - firstObservedAt);
+
+    // Live trade mode can use token birth age. Dex fallback cannot: provider
+    // indexing latency used to make every candidate silently too old.
+    const entryClockMs = hasLiveTradeFlow ? birthAgeMs : observedAgeMs;
+    const maxEntryAgeMs = hasLiveTradeFlow
+      ? REAL_ENTRY_MAX_AGE_LIVE_MS
+      : REAL_ENTRY_MAX_OBSERVED_AGE_FALLBACK_MS;
+
+    const recentBase = ticks[Math.max(0, ticks.length - 3)].marketCapSol;
+    const recentMove = ret(recentBase, p.currentMarketCapSol);
     const buyRatio = directionalTrades > 0 ? p.buys / directionalTrades : null;
-    const earlyEnough = ageMs >= REAL_ENTRY_MIN_AGE_MS && ageMs <= REAL_ENTRY_MAX_AGE_MS;
-    const moving = p.grossReturnPct >= REAL_ENTRY_MIN_RETURN_PCT
-      && p.grossReturnPct <= REAL_ENTRY_MAX_RETURN_PCT
-      && recentMove >= REAL_ENTRY_MIN_RECENT_MOVE_PCT;
+
+    const earlyEnough = entryClockMs >= REAL_ENTRY_MIN_AGE_MS && entryClockMs <= maxEntryAgeMs;
+    const moving =
+      p.grossReturnPct >= REAL_ENTRY_MIN_RETURN_PCT &&
+      p.grossReturnPct <= REAL_ENTRY_MAX_RETURN_PCT &&
+      recentMove >= REAL_ENTRY_MIN_RECENT_MOVE_PCT;
     const notReversing = p.drawdownFromPeakPct > REAL_ENTRY_MAX_DRAWDOWN_PCT;
+
     const pressureOk = buyRatio == null
-      ? recentMove >= 1.0
+      ? (p.observedPriceTicks ?? 0) >= 3 && recentMove >= 0.35
       : p.buys >= 2 && buyRatio >= REAL_ENTRY_MIN_BUY_RATIO;
-    if (!earlyEnough || !moving || !notReversing || !pressureOk) return;
+
+    if (!earlyEnough) {
+      setEntryEngineStatus(
+        entryClockMs < REAL_ENTRY_MIN_AGE_MS
+          ? `TRACK ${p.symbol}: confirmação ${(entryClockMs/1000).toFixed(1)}s`
+          : `PASS ${p.symbol}: janela expirada (${(entryClockMs/1000).toFixed(0)}s)`
+      );
+      return;
+    }
+    if (!moving) {
+      setEntryEngineStatus(`PASS ${p.symbol}: momentum ${p.grossReturnPct.toFixed(1)}% / recente ${recentMove.toFixed(1)}%`);
+      return;
+    }
+    if (!notReversing) {
+      setEntryEngineStatus(`PASS ${p.symbol}: já reverteu ${p.drawdownFromPeakPct.toFixed(1)}%`);
+      return;
+    }
+    if (!pressureOk) {
+      setEntryEngineStatus(
+        buyRatio == null
+          ? `TRACK ${p.symbol}: fallback sem impulso suficiente`
+          : `PASS ${p.symbol}: buy ratio ${(buyRatio*100).toFixed(0)}%`
+      );
+      return;
+    }
+
+    entryQualifiedRef.current += 1;
+    setEntryEngineStatus(`QUALIFIED ${p.symbol}: enviando preflight REAL`);
     void realBuyIfArmed(p.mint, p.currentMarketCapSol, p.name, p.symbol);
   };
-
   const realSellIfOpen = async (mint: string, reason: string, paperExitMarketCapSol?: number | null) => {
     if (realOpenMintRef.current !== mint || realBusyRef.current || realExitPendingRef.current) return;
     realExitPendingRef.current = true;
@@ -1079,7 +1154,7 @@ export default function LaunchRadar() {
     </div>
     <div className="rounded-2xl border border-[var(--accent-risk)]/35 bg-[var(--surface)] p-4 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h3 className="font-display text-base font-semibold">🧠 V26.1 REAL CORE · AUTONOMOUS MANAGER</h3><p className="text-[10px] text-[var(--text-muted)]">Máximo 20 BUY reais · 1 posição ativa · entrada confirmada + preflight. O mirror REAL é ancorado no fill efetivo, não no preço anterior do PAPER. Saída autónoma com trailing/stop, reconciliação on-chain e quarentena automática de tokens realmente invendáveis.</p></div>
+        <div><h3 className="font-display text-base font-semibold">🧠 V26.2 REAL CORE · ENTRY PIPELINE FIX</h3><p className="text-[10px] text-[var(--text-muted)]">Máximo 20 BUY reais · 1 posição ativa · entrada confirmada + preflight. O mirror REAL é ancorado no fill efetivo, não no preço anterior do PAPER. Saída autónoma com trailing/stop, reconciliação on-chain e quarentena automática de tokens realmente invendáveis.</p></div>
         <div className={`font-data text-xs font-bold ${realArmed ? "text-[var(--accent-risk)]" : "text-[var(--text-muted)]"}`}>{realArmed ? "● ARMED" : "○ SAFE / OFF"}</div>
       </div>
       <div className="grid md:grid-cols-[1fr_auto_auto] gap-2">
@@ -1096,6 +1171,7 @@ export default function LaunchRadar() {
       {realStatus?.ok && <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
         <div className="rounded bg-[var(--surface-2)] p-2">Saldo SOL<div className="font-data font-bold">{Number(realStatus.wallet?.balanceSol ?? 0).toFixed(5)}</div><div className="text-[9px] text-[var(--text-faint)]">{realStatus.wallet?.publicKey?.slice(0,6)}…{realStatus.wallet?.publicKey?.slice(-4)}</div></div>
         <div className="rounded bg-[var(--surface-2)] p-2">Entradas<div className="font-data font-bold">{realStatus.state?.entries ?? 0}/20</div><div className="text-[9px] text-[var(--text-faint)]">skips: {Number(realStatus.state?.skippedBuys)||0}</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2 md:col-span-2">Entry engine<div className="font-data text-[11px] font-bold">{entryEngineStatus}</div><div className="text-[9px] text-[var(--text-faint)]">evaluados: {entryEvaluationsRef.current} · qualified: {entryQualifiedRef.current}</div></div>
         <div className="rounded bg-[var(--surface-2)] p-2">Compra/entrada<div className="font-data font-bold">{Math.round(Number(realStatus.buyFraction ?? .20)*100)}% saldo</div><div className="text-[9px] text-[var(--text-faint)]">preflight antes do envio</div></div>
         <div className="rounded bg-[var(--surface-2)] p-2">PnL REAL<div className={`font-data font-bold ${(Number(realStatus.state?.realizedPnlSol)||0)>=0?"text-[var(--accent-opportunity)]":"text-[var(--accent-risk)]"}`}>{(Number(realStatus.state?.realizedPnlSol)||0)>=0?"+":""}{(Number(realStatus.state?.realizedPnlSol)||0).toFixed(6)} SOL</div><div className="text-[9px] text-[var(--text-faint)]">W/L {Number(realStatus.state?.wins)||0}/{Number(realStatus.state?.losses)||0}</div></div>
       </div>}
@@ -1134,7 +1210,7 @@ export default function LaunchRadar() {
       {realStatus?.state?.lastAction && <div className="text-[10px] text-[var(--text-muted)]">Última acción: <b>{realStatus.state.lastAction}</b>{realStatus.state?.stopReason ? <span> · stop: <b>{String(realStatus.state.stopReason)}</b></span> : null}{Number(realStatus.state?.abandonedCount)>0 ? <span> · quarantine: <b>{Number(realStatus.state.abandonedCount)}</b></span> : null}</div>}
       {realStatus?.state?.lastQuarantineReason && <div className="rounded-lg border border-[var(--accent-gold)]/30 bg-[var(--accent-gold)]/5 p-2 text-[10px] text-[var(--text-muted)]">Quarantine não significa “vendido”: o runner deixou de ficar bloqueado por um token sem rota executável e registou o custo de forma conservadora. Último motivo: {String(realStatus.state.lastQuarantineReason).slice(0,240)}</div>}
       {(realError || realStatus?.state?.lastError || realStatus?.state?.lastSellError) && <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk)]/5 p-2 text-[10px] text-[var(--accent-risk)]">{realError ?? realStatus.state.lastError ?? realStatus.state.lastSellError}</div>}
-      <div className="text-[9px] text-[var(--text-faint)]">V26.1 REAL CORE: o fill REAL é calculado a partir do SOL enviado, tokens realmente recebidos e supply on-chain. PAPER/REAL partilham a política de saída, inclusive no fallback DexScreener. SELL reconcilia saldo on-chain, alterna pools/slippage e pode usar Jupiter V2 como rota independente. Uma posição antiga que continue realmente invendável após recuperação é QUARANTINED e deixa de bloquear o runner; nunca é apresentada como se tivesse sido vendida. BUY 6002/6024/slippage vira SKIP. PnL REAL inclui fees.</div>
+      <div className="text-[9px] text-[var(--text-faint)]">V26.2 REAL CORE: Dex fallback usa idade desde a primeira cotação observável; o Entry engine mostra TRACK/PASS/QUALIFIED/SKIP/FILLED para nunca mais parecer morto sem diagnóstico. o fill REAL é calculado a partir do SOL enviado, tokens realmente recebidos e supply on-chain. PAPER/REAL partilham a política de saída, inclusive no fallback DexScreener. SELL reconcilia saldo on-chain, alterna pools/slippage e pode usar Jupiter V2 como rota independente. Uma posição antiga que continue realmente invendável após recuperação é QUARANTINED e deixa de bloquear o runner; nunca é apresentada como se tivesse sido vendida. BUY 6002/6024/slippage vira SKIP. PnL REAL inclui fees.</div>
     </div>
 
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">
