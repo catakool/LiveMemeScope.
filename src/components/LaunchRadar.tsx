@@ -247,6 +247,14 @@ export default function LaunchRadar() {
   const [clock, setClock] = useState(() => Date.now());
   const [autoPaper, setAutoPaper] = useState(true);
   const [sniperPositions, setSniperPositions] = useState<PaperSniperPosition[]>([]);
+  const [realArmed, setRealArmed] = useState(false);
+  const [realToken, setRealToken] = useState("");
+  const [realStatus, setRealStatus] = useState<any>(null);
+  const [realBusy, setRealBusy] = useState(false);
+  const [realError, setRealError] = useState<string | null>(null);
+  const realArmedRef = useRef(false);
+  const realTokenRef = useRef("");
+  const realOpenMintRef = useRef<string | null>(null);
   const positionsRef = useRef<PaperSniperPosition[]>([]);
   const autoPaperRef = useRef(true);
   const wsRef = useRef<WebSocket | null>(null);
@@ -286,6 +294,63 @@ export default function LaunchRadar() {
 
   useEffect(() => { autoPaperRef.current = autoPaper; }, [autoPaper]);
 
+  useEffect(() => { realArmedRef.current = realArmed; }, [realArmed]);
+  useEffect(() => { realTokenRef.current = realToken; }, [realToken]);
+
+  const realRequest = async (method: "GET" | "POST", body?: any) => {
+    const token = realTokenRef.current.trim();
+    if (!token) throw new Error("Introduce primero el REAL CONTROL TOKEN.");
+    const response = await fetch("/api/real-test", {
+      method,
+      headers: { "Content-Type": "application/json", "x-real-control-token": token },
+      body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
+      cache: "no-store",
+    });
+    const data = await response.json();
+    if (!response.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${response.status}`);
+    setRealStatus(data);
+    realOpenMintRef.current = data?.state?.openMint ?? null;
+    return data;
+  };
+
+  const refreshRealStatus = async () => {
+    try { setRealError(null); await realRequest("GET"); }
+    catch (e) { setRealError(e instanceof Error ? e.message : "Error REAL TEST"); }
+  };
+
+  const realBuyIfArmed = async (mint: string) => {
+    if (!realArmedRef.current || realBusy || realOpenMintRef.current) return;
+    try {
+      setRealBusy(true); setRealError(null);
+      const data = await realRequest("POST", { action: "buy", mint });
+      realOpenMintRef.current = data?.state?.openMint ?? mint;
+      if (data?.state?.stopped) setRealArmed(false);
+    } catch (e) {
+      setRealError(e instanceof Error ? e.message : "BUY real falló");
+      setRealArmed(false); // fail closed
+    } finally { setRealBusy(false); }
+  };
+
+  const realSellIfOpen = async (mint: string, reason: string) => {
+    if (realOpenMintRef.current !== mint) return;
+    try {
+      setRealBusy(true); setRealError(null);
+      const data = await realRequest("POST", { action: "sell", mint, reason });
+      realOpenMintRef.current = data?.state?.openMint ?? null;
+      if (data?.state?.stopped) setRealArmed(false);
+    } catch (e) {
+      setRealError(`SELL REAL requiere atención: ${e instanceof Error ? e.message : "error"}`);
+      setRealArmed(false); // stop new buys; do not hide failed exit
+    } finally { setRealBusy(false); }
+  };
+
+  useEffect(() => {
+    if (!realToken) return;
+    refreshRealStatus();
+    const id = window.setInterval(refreshRealStatus, 10_000);
+    return () => window.clearInterval(id);
+  }, [realToken]);
+
   useEffect(() => {
     positionsRef.current = sniperPositions;
     try { window.localStorage.setItem(SNIPER_STORAGE_KEY, JSON.stringify(sniperPositions.slice(0, 120))); } catch {}
@@ -317,6 +382,7 @@ export default function LaunchRadar() {
     if (!closed) return;
     positionsRef.current = next;
     setSniperPositions(next);
+    if (reason !== "no_data") void realSellIfOpen(mint, reason);
     try { wsRef.current?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
   };
 
@@ -494,6 +560,9 @@ export default function LaunchRadar() {
                 const next = [p, ...positionsRef.current].slice(0, 120);
                 positionsRef.current = next;
                 setSniperPositions(next);
+                // REAL TEST mirrors only the first paper position while armed.
+                // Server enforces 1 open position + 20-entry hard cap.
+                void realBuyIfArmed(mint);
                 if (provider.supportsTrades) {
                   ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
                 } else if (tradeWsRef.current?.readyState === WebSocket.OPEN) {
@@ -738,6 +807,33 @@ export default function LaunchRadar() {
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-display text-xl font-semibold">⚡ Launch Radar</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Solo Solana · primeros 5 minutos. Ya no escondemos un lanzamiento por tener poco volumen o liquidez: primero lo ves, después decides si está despertando.</p></div><div className="text-right text-xs text-[var(--text-muted)]"><div className="font-data text-sm"><b>{launch.length}</b> pares &lt;5m</div><div>escaneados: <b>{feed?.scannedTokens ?? 0}</b></div></div></div>
       <div className="mt-3 rounded-lg bg-[var(--surface-2)] p-2 text-[10px] text-[var(--text-muted)]">⚪ NEW → 🟡 WARMING UP → 🟢 ACCELERATING → 🔥 LAUNCHING. Launch Velocity ordena y describe; ya no elimina tokens recién nacidos. Riesgos críticos se marcan como 🔴 DANGER.</div>
     </div>
+    <div className="rounded-2xl border border-[var(--accent-risk)]/35 bg-[var(--surface)] p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div><h3 className="font-display text-base font-semibold">🧨 V22 REAL TEST · HOT WALLET AISLADA</h3><p className="text-[10px] text-[var(--text-muted)]">Máximo 20 BUY reales · 1 posición simultánea · reutiliza únicamente el saldo de la wallet experimental · el servidor se detiene al llegar a 20 o quedarse sin saldo operativo.</p></div>
+        <div className={`font-data text-xs font-bold ${realArmed ? "text-[var(--accent-risk)]" : "text-[var(--text-muted)]"}`}>{realArmed ? "● ARMED" : "○ SAFE / OFF"}</div>
+      </div>
+      <div className="grid md:grid-cols-[1fr_auto_auto] gap-2">
+        <input type="password" value={realToken} onChange={(e)=>setRealToken(e.target.value)} placeholder="REAL CONTROL TOKEN (no es tu seed)" className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-xs outline-none" />
+        <button onClick={refreshRealStatus} className="rounded-lg border border-[var(--border)] px-3 py-2 text-xs">Comprobar wallet</button>
+        <button disabled={!realStatus?.ok || realStatus?.state?.stopped || realBusy} onClick={()=>setRealArmed(v=>!v)} className={`rounded-lg border px-3 py-2 text-xs font-bold ${realArmed ? "border-[var(--accent-risk)] text-[var(--accent-risk)]" : "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]"} disabled:opacity-40`}>{realArmed ? "DESARMAR" : "ARM REAL TEST"}</button>
+      </div>
+      {realStatus?.ok && <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[10px]">
+        <div className="rounded bg-[var(--surface-2)] p-2">Wallet<div className="font-data">{realStatus.wallet?.publicKey?.slice(0,6)}…{realStatus.wallet?.publicKey?.slice(-4)}</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">Saldo SOL<div className="font-data font-bold">{Number(realStatus.wallet?.balanceSol ?? 0).toFixed(5)}</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">Entradas<div className="font-data font-bold">{realStatus.state?.entries ?? 0}/20</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">Posición<div className="font-data">{realStatus.state?.openMint ? `${String(realStatus.state.openMint).slice(0,6)}…` : "ninguna"}</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">Compra/entrada<div className="font-data">{Math.round(Number(realStatus.buyFraction ?? .25)*100)}% saldo</div></div>
+      </div>}
+      <div className="flex flex-wrap gap-2">
+        <button onClick={async()=>{ try{ await realRequest("POST",{action:"stop"}); setRealArmed(false); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--accent-risk)] px-3 py-1.5 text-xs font-bold text-[var(--accent-risk)]">■ KILL SWITCH</button>
+        <button onClick={async()=>{ if(!confirm("¿Resetear contador REAL TEST? Hazlo solo antes de una prueba nueva.")) return; try{ await realRequest("POST",{action:"reset"}); setRealArmed(false); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--text-muted)]">Reset contador</button>
+        {realStatus?.state?.lastSignature && <a className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs" target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${realStatus.state.lastSignature}`}>Última TX ↗</a>}
+      </div>
+      {realStatus?.state?.lastAction && <div className="text-[10px] text-[var(--text-muted)]">Última acción: <b>{realStatus.state.lastAction}</b></div>}
+      {(realError || realStatus?.state?.lastError) && <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk)]/5 p-2 text-[10px] text-[var(--accent-risk)]">{realError ?? realStatus.state.lastError}</div>}
+      <div className="text-[9px] text-[var(--text-faint)]">Fail-closed: cualquier error de BUY/SELL desarma nuevas entradas. La private key nunca se envía al navegador; debe existir solo como Secret Environment Variable del deployment. Este modo usa PumpPortal Local Transaction API y preflight habilitado.</div>
+    </div>
+
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div><h3 className="font-display text-base font-semibold">🤖 Auto Paper Sniper</h3><p className="text-[10px] text-[var(--text-faint)]">$10 virtuales · máximo 5 posiciones · usa trades en tiempo real cuando PumpDev está disponible; si no, activa monitor de precio DexScreener. Cero wallet, cero SOL.</p></div>
