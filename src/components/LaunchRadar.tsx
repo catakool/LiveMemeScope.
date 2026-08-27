@@ -129,7 +129,7 @@ type PaperSniperPosition = {
 const SNIPER_NOTIONAL_USD = 10;
 const SNIPER_FRICTION_PCT = 3; // conservative paper estimate; NOT actual execution slippage
 const SNIPER_MAX_OPEN = 5; // anonymous PumpDev token-trade subscription pool
-const SNIPER_STORAGE_KEY = "memescope:paper-sniper:v20.3";
+const SNIPER_STORAGE_KEY = "memescope:paper-sniper:v21-audit";
 
 // A paper result is only statistically valid after multiple POST-entry quotes
 // AND evidence that the observed price actually changed. This prevents a stale
@@ -167,6 +167,28 @@ function hasValidPaperData(position: PaperSniperPosition): boolean {
   if (ticks.length < 2) return false;
   const span = ticks[ticks.length - 1].t - ticks[0].t;
   return span >= MIN_OBSERVED_SPAN_MS;
+}
+
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a,b) => a-b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function paperTradePnlUsd(p: PaperSniperPosition): number {
+  return SNIPER_NOTIONAL_USD * (p.netReturnPct / 100);
+}
+
+function maxPaperDrawdownUsd(trades: PaperSniperPosition[]): number {
+  const ordered = [...trades].sort((a,b) => (a.closedAt ?? 0) - (b.closedAt ?? 0));
+  let equity = 0, peak = 0, maxDd = 0;
+  for (const trade of ordered) {
+    equity += paperTradePnlUsd(trade);
+    peak = Math.max(peak, equity);
+    maxDd = Math.max(maxDd, peak - equity);
+  }
+  return maxDd;
 }
 
 function sniperExitLabel(reason: SniperExitReason | null) {
@@ -698,7 +720,19 @@ export default function LaunchRadar() {
   const sniperValid = sniperClosed.filter((p) => p.validResult !== false && p.exitReason !== "no_data");
   const sniperNoData = sniperClosed.length - sniperValid.length;
   const sniperWins = sniperValid.filter((p) => p.netReturnPct > 0).length;
-  const sniperPnlUsd = sniperValid.reduce((sum, p) => sum + SNIPER_NOTIONAL_USD * (p.netReturnPct / 100), 0);
+  const sniperPnlUsd = sniperValid.reduce((sum, p) => sum + paperTradePnlUsd(p), 0);
+  const sniperReturns = sniperValid.map((p) => p.netReturnPct);
+  const sniperMedianReturn = median(sniperReturns);
+  const grossProfitUsd = sniperValid.filter((p) => p.netReturnPct > 0).reduce((sum,p) => sum + paperTradePnlUsd(p), 0);
+  const grossLossUsd = Math.abs(sniperValid.filter((p) => p.netReturnPct < 0).reduce((sum,p) => sum + paperTradePnlUsd(p), 0));
+  const profitFactor = grossLossUsd > 0 ? grossProfitUsd / grossLossUsd : (grossProfitUsd > 0 ? Infinity : null);
+  const maxDrawdownUsd = maxPaperDrawdownUsd(sniperValid);
+  const bestTrade = sniperValid.length ? [...sniperValid].sort((a,b) => b.netReturnPct - a.netReturnPct)[0] : null;
+  const worstTrade = sniperValid.length ? [...sniperValid].sort((a,b) => a.netReturnPct - b.netReturnPct)[0] : null;
+  const trimCount = sniperValid.length >= 20 ? Math.max(1, Math.ceil(sniperValid.length * 0.01)) : 0;
+  const trimmedTrades = [...sniperValid].sort((a,b) => b.netReturnPct - a.netReturnPct).slice(trimCount);
+  const pnlWithoutTop1Pct = trimmedTrades.reduce((sum,p) => sum + paperTradePnlUsd(p), 0);
+  const topTradeShare = sniperPnlUsd > 0 && bestTrade ? (paperTradePnlUsd(bestTrade) / sniperPnlUsd) * 100 : null;
   return <section className="space-y-5">
     <div className="rounded-2xl border border-[var(--accent-info)]/35 bg-[var(--surface)] p-5">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-display text-xl font-semibold">⚡ Launch Radar</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Solo Solana · primeros 5 minutos. Ya no escondemos un lanzamiento por tener poco volumen o liquidez: primero lo ves, después decides si está despertando.</p></div><div className="text-right text-xs text-[var(--text-muted)]"><div className="font-data text-sm"><b>{launch.length}</b> pares &lt;5m</div><div>escaneados: <b>{feed?.scannedTokens ?? 0}</b></div></div></div>
@@ -722,13 +756,30 @@ export default function LaunchRadar() {
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">Win rate</div><b className="font-data text-lg">{sniperValid.length ? `${((sniperWins / sniperValid.length) * 100).toFixed(0)}%` : "N/D"}</b></div>
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">PnL virtual</div><b className={`font-data text-lg ${sniperPnlUsd >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}`}>{sniperPnlUsd >= 0 ? "+" : ""}${sniperPnlUsd.toFixed(2)}</b></div>
       </div>
+      <div className="rounded-xl border border-[var(--accent-gold)]/30 bg-[var(--surface-2)] p-3 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div><b className="text-sm">🧪 Execution Audit</b><div className="text-[9px] text-[var(--text-faint)]">Comprueba si el PnL depende de pumps extremos antes de considerar dinero real.</div></div>
+          <div className="text-[10px] text-[var(--accent-gold)]">PAPER ONLY</div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
+          <div><span className="text-[var(--text-faint)]">Trades válidos</span><div className="font-data text-sm font-semibold">{sniperValid.length}</div></div>
+          <div><span className="text-[var(--text-faint)]">Mediana / trade</span><div className="font-data text-sm font-semibold">{sniperMedianReturn == null ? "N/D" : pctText(sniperMedianReturn)}</div></div>
+          <div><span className="text-[var(--text-faint)]">Profit factor</span><div className="font-data text-sm font-semibold">{profitFactor == null ? "N/D" : profitFactor === Infinity ? "∞" : profitFactor.toFixed(2)}</div></div>
+          <div><span className="text-[var(--text-faint)]">Max drawdown</span><div className="font-data text-sm font-semibold">-${maxDrawdownUsd.toFixed(2)}</div></div>
+          <div><span className="text-[var(--text-faint)]">Mejor trade</span><div className="font-data text-sm font-semibold text-[var(--accent-opportunity)]">{bestTrade ? `${bestTrade.symbol} ${pctText(bestTrade.netReturnPct)}` : "N/D"}</div></div>
+          <div><span className="text-[var(--text-faint)]">Peor trade</span><div className="font-data text-sm font-semibold text-[var(--accent-risk)]">{worstTrade ? `${worstTrade.symbol} ${pctText(worstTrade.netReturnPct)}` : "N/D"}</div></div>
+          <div><span className="text-[var(--text-faint)]">PnL sin top 1%</span><div className={`font-data text-sm font-semibold ${pnlWithoutTop1Pct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}`}>{pnlWithoutTop1Pct >= 0 ? "+" : ""}${pnlWithoutTop1Pct.toFixed(2)}</div></div>
+          <div><span className="text-[var(--text-faint)]">Mejor trade / PnL</span><div className="font-data text-sm font-semibold">{topTradeShare == null ? "N/D" : `${topTradeShare.toFixed(0)}%`}</div></div>
+        </div>
+        <div className="text-[9px] text-[var(--text-muted)]">Si “PnL sin top 1%” se derrumba o el mejor trade explica gran parte del beneficio, el resultado todavía depende demasiado de outliers. Esto sigue usando precios observados, no garantiza ejecución real.</div>
+      </div>
       <div className="text-[10px] text-[var(--text-muted)]">Salida dinámica: hard stop −12%; trailing de ~6–12% desde el máximo; reversión; sell pressure cuando hay stream de trades; no-momentum; máximo 90s. Si aparece “PumpPortal fallback”, el bot reintenta PumpDev para trades y usa DexScreener como último respaldo. Una operación necesita ≥3 cotizaciones posteriores, ≥2 niveles de precio distintos y separación temporal real para ser VÁLIDA. Si no, acaba en NO DATA y no toca PnL/win rate. El 3% de fricción solo se descuenta a resultados válidos.</div>
       {sniperOpen.length > 0 && <div className="grid lg:grid-cols-2 gap-2">{sniperOpen.map((p) => <div key={p.mint} className="rounded-xl border border-[var(--accent-info)]/30 bg-[var(--surface-2)] p-3">
         <div className="flex justify-between gap-2"><div><b>{p.name}</b> <span className="text-[var(--text-muted)]">${p.symbol}</span><div className="text-[9px] text-[var(--text-faint)]">PAPER · {Math.max(0, Math.floor((clock - p.openedAt)/1000))}s · {!hasValidPaperData(p) ? `validando datos ${Math.min(p.observedPriceTicks ?? 0, MIN_VALID_PRICE_TICKS)}/${MIN_VALID_PRICE_TICKS}…` : `${p.tradeCount} updates válidos`}</div></div><div className={`font-data font-bold ${p.netReturnPct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}`}>{!hasValidPaperData(p) ? "WAIT" : pctText(p.grossReturnPct)}</div></div>
         <div className="mt-2 grid grid-cols-3 gap-1 text-[10px]"><div>Peak <b className="text-[var(--accent-opportunity)]">{pctText(p.peakReturnPct)}</b></div><div>From peak <b className={p.drawdownFromPeakPct < 0 ? "text-[var(--accent-risk)]" : ""}>{pctText(p.drawdownFromPeakPct)}</b></div><div>B/S <b>{p.buys}/{p.sells}</b></div></div>
         <button onClick={() => closePaper(p.mint, "manual")} className="mt-2 rounded border border-[var(--border)] px-2 py-1 text-[10px] text-[var(--text-muted)]">Cerrar paper ahora</button>
       </div>)}</div>}
-      {sniperClosed.length > 0 && <details><summary className="cursor-pointer text-xs text-[var(--text-muted)]">Últimas salidas ({Math.min(sniperClosed.length, 20)})</summary><div className="mt-2 space-y-1">{sniperClosed.slice(0,20).map((p) => <div key={`${p.mint}-${p.openedAt}`} className="flex flex-wrap justify-between gap-2 rounded bg-[var(--surface-2)] px-2 py-1.5 text-[10px]"><span><b>${p.symbol}</b> · {sniperExitLabel(p.exitReason)} · peak {pctText(p.peakReturnPct)}</span><b className={p.exitReason === "no_data" ? "text-[var(--text-muted)]" : p.netReturnPct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}>{p.exitReason === "no_data" ? "N/D" : pctText(p.netReturnPct)}</b></div>)}</div></details>}
+      {sniperClosed.length > 0 && <details><summary className="cursor-pointer text-xs text-[var(--text-muted)]">Últimas salidas ({Math.min(sniperClosed.length, 20)})</summary><div className="mt-2 space-y-1">{sniperClosed.slice(0,20).map((p) => <div key={`${p.mint}-${p.openedAt}`} className="flex flex-wrap justify-between gap-2 rounded bg-[var(--surface-2)] px-2 py-1.5 text-[10px]"><span><b>${p.symbol}</b> · {sniperExitLabel(p.exitReason)} · entry MC {p.entryMarketCapSol.toFixed(3)} SOL → exit MC {p.currentMarketCapSol.toFixed(3)} SOL · peak {pctText(p.peakReturnPct)} · {p.observedPriceTicks} quotes</span><span className="flex gap-2"><b className={p.exitReason === "no_data" ? "text-[var(--text-muted)]" : p.netReturnPct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}>{p.exitReason === "no_data" ? "N/D" : pctText(p.netReturnPct)}</b>{p.exitReason !== "no_data" && <b className={paperTradePnlUsd(p) >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}>{paperTradePnlUsd(p) >= 0 ? "+" : ""}${paperTradePnlUsd(p).toFixed(2)}</b>}</span></div>)}</div></details>}
     </div>
 
     <div className="space-y-2">
