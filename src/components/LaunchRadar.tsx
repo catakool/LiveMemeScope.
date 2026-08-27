@@ -256,6 +256,8 @@ export default function LaunchRadar() {
   const realBusyRef = useRef(false);
   const realTokenRef = useRef("");
   const realOpenMintRef = useRef<string | null>(null);
+  const realExitPendingRef = useRef(false);
+  const realExitReasonRef = useRef("autonomous_recovery");
   const positionsRef = useRef<PaperSniperPosition[]>([]);
   const autoPaperRef = useRef(true);
   const wsRef = useRef<WebSocket | null>(null);
@@ -325,11 +327,13 @@ export default function LaunchRadar() {
 
     const mc = Number(state?.openEntryMarketCapSol);
     if (!(mc > 0)) {
-      // Positions bought by the original V22 did not persist the entry MC.
-      // Never mix a Dex USD market cap with PumpDev's SOL marketCapSol: that can
-      // manufacture gigantic returns. The existing legacy position is therefore
-      // recovery-manual only; the UI exposes SELL OPEN POSITION NOW.
-      setRealError("Posición heredada de V22 sin entry price persistido. Para esta posición antigua usa SELL OPEN POSITION NOW; las siguientes ya se recuperan automáticamente.");
+      // We cannot reconstruct the exit logic safely without the original entry
+      // reference. Autonomous policy: flatten the orphaned position instead of
+      // asking the user to make a trading decision.
+      realExitPendingRef.current = true;
+      realExitReasonRef.current = "legacy_orphan_recovery";
+      setRealError("Posición antigua sin entry price: V23.2 está intentando venderla automáticamente.");
+      void realSellIfOpen(mint, "legacy_orphan_recovery");
       return;
     }
 
@@ -381,10 +385,19 @@ export default function LaunchRadar() {
         setRealArmed(false);
       }
     } catch (e) {
-      setRealError(e instanceof Error ? e.message : "BUY real falló");
-      // Fail closed only for a genuine execution/config error.
-      realArmedRef.current=false;
-      setRealArmed(false);
+      const message = e instanceof Error ? e.message : "BUY real falló";
+      const transientSlippage =
+        /TooMuchSolRequired|\b6002\b|0x1772|slippage.*too much sol|required to buy/i.test(message);
+      if (transientSlippage) {
+        // The token ran away before execution. Do NOT chase it and do NOT stop
+        // the experiment: skip this mint and wait for the next launch.
+        setRealError("SKIP TOKEN · preço/slippage fugiu antes do BUY. Bot continua ARMED.");
+      } else {
+        setRealError(message);
+        // Unknown execution/config errors still fail closed.
+        realArmedRef.current=false;
+        setRealArmed(false);
+      }
     } finally {
       realBusyRef.current=false;
       setRealBusy(false);
@@ -392,16 +405,29 @@ export default function LaunchRadar() {
   };
 
   const realSellIfOpen = async (mint: string, reason: string) => {
-    if (realOpenMintRef.current !== mint) return;
+    if (realOpenMintRef.current !== mint || realBusyRef.current) return;
+    realExitPendingRef.current = true;
+    realExitReasonRef.current = reason || "autonomous_exit";
     try {
       realBusyRef.current=true;
-      setRealBusy(true); setRealError(null);
+      setRealBusy(true);
+      setRealError(null);
       const data = await realRequest("POST", { action: "sell", mint, reason });
       realOpenMintRef.current = data?.state?.openMint ?? null;
-      if (data?.state?.stopped) setRealArmed(false);
+      if (!realOpenMintRef.current) {
+        realExitPendingRef.current = false;
+      }
+      if (data?.state?.stopped) {
+        realArmedRef.current = false;
+        setRealArmed(false);
+      }
     } catch (e) {
-      setRealError(`SELL REAL requiere atención: ${e instanceof Error ? e.message : "error"}`);
-      setRealArmed(false); // stop new buys; do not hide failed exit
+      // An exit failure is not handed back to the user. New BUYs are paused,
+      // while the retry loop below keeps trying to flatten the same mint.
+      const msg = e instanceof Error ? e.message : "error";
+      setRealError(`SELL RETRY automático · ${msg}`);
+      realArmedRef.current = false;
+      setRealArmed(false);
     } finally {
       realBusyRef.current=false;
       setRealBusy(false);
@@ -412,6 +438,15 @@ export default function LaunchRadar() {
     if (!realToken) return;
     refreshRealStatus();
     const id = window.setInterval(refreshRealStatus, 10_000);
+    return () => window.clearInterval(id);
+  }, [realToken]);
+  useEffect(() => {
+    if (!realToken) return;
+    const id = window.setInterval(() => {
+      const mint = realOpenMintRef.current;
+      if (!mint || !realExitPendingRef.current || realBusyRef.current) return;
+      void realSellIfOpen(mint, realExitReasonRef.current || "autonomous_retry");
+    }, 4_000);
     return () => window.clearInterval(id);
   }, [realToken]);
 
@@ -900,13 +935,13 @@ export default function LaunchRadar() {
           if(!confirm("Vender AHORA el 100% de la posición real abierta?")) return;
           await realSellIfOpen(String(realStatus.state.openMint),"manual_recovery");
           await refreshRealStatus();
-        }} className="rounded-lg border border-[var(--accent-gold)]/60 px-3 py-1.5 text-xs font-bold text-[var(--accent-gold)] disabled:opacity-40">⚠ SELL OPEN POSITION NOW</button>}
+        }} className="rounded-lg border border-[var(--accent-gold)]/60 px-3 py-1.5 text-xs font-bold text-[var(--accent-gold)] disabled:opacity-40">EMERGENCY SELL (backup)</button>}
         <button onClick={async()=>{ if(!confirm("¿Resetear contador REAL TEST? Hazlo solo antes de una prueba nueva.")) return; try{ await realRequest("POST",{action:"reset"}); setRealArmed(false); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--text-muted)]">Reset contador</button>
         {realStatus?.state?.lastSignature && <a className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs" target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${realStatus.state.lastSignature}`}>Última TX ↗</a>}
       </div>
       {realStatus?.state?.lastAction && <div className="text-[10px] text-[var(--text-muted)]">Última acción: <b>{realStatus.state.lastAction}</b></div>}
       {(realError || realStatus?.state?.lastError) && <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk)]/5 p-2 text-[10px] text-[var(--accent-risk)]">{realError ?? realStatus.state.lastError}</div>}
-      <div className="text-[9px] text-[var(--text-faint)]">V23: PnL REAL mede o delta da wallet BUY→SELL incluindo fees. ARMED queda persistido en Redis, una posición abierta se recupera tras refrescar la página y SELL sigue permitido aunque el Kill Switch esté activo. La private key nunca se envía al navegador. `priorityFee` por defecto = 0.00005 SOL; Solscan puede abreviar los ceros con subíndices.</div>
+      <div className="text-[9px] text-[var(--text-faint)]">V23.2 AUTONOMOUS: posições órfãs são fechadas automaticamente; SELL falhado entra em retry automático; BUY com slippage 6002 é ignorado e o bot segue para a próxima moeda. PnL REAL mede o delta da wallet BUY→SELL incluindo fees. ARMED queda persistido en Redis, una posición abierta se recupera tras refrescar la página y SELL sigue permitido aunque el Kill Switch esté activo. La private key nunca se envía al navegador. `priorityFee` por defecto = 0.00005 SOL; Solscan puede abreviar los ceros con subíndices.</div>
     </div>
 
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">
