@@ -182,6 +182,8 @@ export default function LaunchRadar() {
   const [loading, setLoading] = useState(true);
   const [instant, setInstant] = useState<InstantLaunch[]>([]);
   const [streamState, setStreamState] = useState<"connecting" | "live" | "offline">("connecting");
+  const [streamSource, setStreamSource] = useState<"pumpdev" | "pumpportal" | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
   const [autoPaper, setAutoPaper] = useState(true);
   const [sniperPositions, setSniperPositions] = useState<PaperSniperPosition[]>([]);
@@ -277,22 +279,92 @@ export default function LaunchRadar() {
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnect: number | null = null;
+    let connectTimeout: number | null = null;
     let stopped = false;
+    let providerIndex = 0;
+
+    const providers = [
+      { name: "pumpdev" as const, url: "wss://pumpdev.io/ws", supportsTrades: true },
+      // PumpPortal is a fallback for NEW TOKEN events. Their current trade-data
+      // subscriptions may require an API key/funded linked wallet, so V20.1 does
+      // NOT subscribe to token trades there. Open paper positions fall back to
+      // DexScreener price polling instead.
+      { name: "pumpportal" as const, url: "wss://pumpportal.fun/api/data", supportsTrades: false },
+    ];
+
+    const scheduleReconnect = () => {
+      if (stopped) return;
+      if (reconnect !== null) window.clearTimeout(reconnect);
+      reconnect = window.setTimeout(() => {
+        providerIndex = 0;
+        connect();
+      }, 4_000);
+    };
+
+    const tryNextProvider = (reason: string) => {
+      if (stopped) return;
+      setStreamError(reason);
+      try {
+        if (ws) {
+          ws.onclose = null;
+          ws.onerror = null;
+          ws.close();
+        }
+      } catch {}
+      ws = null;
+      wsRef.current = null;
+      providerIndex += 1;
+      if (providerIndex < providers.length) {
+        window.setTimeout(connect, 250);
+      } else {
+        setStreamState("offline");
+        setStreamSource(null);
+        scheduleReconnect();
+      }
+    };
+
     const connect = () => {
       if (stopped) return;
+      const provider = providers[providerIndex];
+      if (!provider) {
+        setStreamState("offline");
+        scheduleReconnect();
+        return;
+      }
       setStreamState("connecting");
+      setStreamSource(provider.name);
+      setStreamError(null);
       try {
-        ws = new WebSocket("wss://pumpdev.io/ws");
+        ws = new WebSocket(provider.url);
         wsRef.current = ws;
+
+        // A socket that never reaches OPEN is functionally offline. Move to fallback.
+        connectTimeout = window.setTimeout(() => {
+          if (ws && ws.readyState !== WebSocket.OPEN) {
+            tryNextProvider(`${provider.name}: timeout al conectar`);
+          }
+        }, 5_000);
+
         ws.onopen = () => {
+          if (connectTimeout !== null) window.clearTimeout(connectTimeout);
           setStreamState("live");
+          setStreamSource(provider.name);
+          setStreamError(null);
           ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
-          const openMints = positionsRef.current.filter((p) => p.status === "open").slice(0, SNIPER_MAX_OPEN).map((p) => p.mint);
-          if (openMints.length) ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: openMints }));
+          if (provider.supportsTrades) {
+            const openMints = positionsRef.current.filter((p) => p.status === "open").slice(0, SNIPER_MAX_OPEN).map((p) => p.mint);
+            if (openMints.length) ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: openMints }));
+          }
         };
+
         ws.onmessage = (event) => {
           try {
             const msg = JSON.parse(String(event.data));
+            // Some providers return an error/status frame without a mint.
+            if (msg?.error) {
+              setStreamError(`${provider.name}: ${String(msg.error).slice(0, 120)}`);
+              return;
+            }
             const mint = typeof msg?.mint === "string" ? msg.mint : "";
             if (!mint) return;
 
@@ -320,12 +392,14 @@ export default function LaunchRadar() {
                 const next = [p, ...positionsRef.current].slice(0, 120);
                 positionsRef.current = next;
                 setSniperPositions(next);
-                ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+                if (provider.supportsTrades) {
+                  ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+                }
               }
               return;
             }
 
-            if (msg?.txType === "buy" || msg?.txType === "sell") {
+            if (provider.supportsTrades && (msg?.txType === "buy" || msg?.txType === "sell")) {
               const current = positionsRef.current.find((p) => p.mint === mint && p.status === "open");
               if (!current) return;
               const mc = typeof msg?.marketCapSol === "number" ? msg.marketCapSol : (typeof msg?.marketCapQuote === "number" ? msg.marketCapQuote : null);
@@ -337,26 +411,105 @@ export default function LaunchRadar() {
               setSniperPositions(next);
               if (reason) ws?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
             }
-          } catch {}
+          } catch (error) {
+            setStreamError(`${provider.name}: mensaje no válido`);
+          }
         };
-        ws.onerror = () => setStreamState("offline");
-        ws.onclose = () => {
-          setStreamState("offline");
-          if (!stopped) reconnect = window.setTimeout(connect, 3_000);
+
+        ws.onerror = () => {
+          if (ws?.readyState !== WebSocket.OPEN) {
+            tryNextProvider(`${provider.name}: WebSocket rechazado/no disponible`);
+          } else {
+            setStreamError(`${provider.name}: error de WebSocket`);
+          }
         };
-      } catch {
-        setStreamState("offline");
-        reconnect = window.setTimeout(connect, 3_000);
+        ws.onclose = (event) => {
+          if (connectTimeout !== null) window.clearTimeout(connectTimeout);
+          if (stopped) return;
+          // If the current provider never opened (or closes abnormally), try fallback.
+          if (providerIndex < providers.length - 1) {
+            tryNextProvider(`${provider.name}: conexión cerrada (${event.code})`);
+          } else {
+            setStreamState("offline");
+            setStreamError(`${provider.name}: conexión cerrada (${event.code})`);
+            setStreamSource(null);
+            scheduleReconnect();
+          }
+        };
+      } catch (error) {
+        tryNextProvider(`${provider.name}: no se pudo crear WebSocket`);
       }
     };
     connect();
     return () => {
       stopped = true;
       if (reconnect !== null) window.clearTimeout(reconnect);
+      if (connectTimeout !== null) window.clearTimeout(connectTimeout);
       ws?.close();
       wsRef.current = null;
     };
   }, []);
+
+  // Fallback paper-price monitor. When PumpDev trade streaming is unavailable
+  // (for example because the browser/provider rejects that socket), positions are
+  // still evaluated from DexScreener every ~2.5s. This preserves trailing/hard-stop
+  // testing, but sell-pressure exits require PumpDev's real trade stream.
+  useEffect(() => {
+    let stopped = false;
+    let busy = false;
+    const poll = async () => {
+      if (stopped || busy) return;
+      // PumpDev LIVE already gives tick-by-tick trade events; do not duplicate them.
+      if (streamState === "live" && streamSource === "pumpdev") return;
+      const open = positionsRef.current.filter((p) => p.status === "open").slice(0, SNIPER_MAX_OPEN);
+      if (!open.length) return;
+      busy = true;
+      try {
+        const addresses = open.map((p) => p.mint).join(",");
+        const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${addresses}`, { cache: "no-store" });
+        if (!res.ok) return;
+        const pairs = await res.json() as Array<{ baseToken?: { address?: string }; quoteToken?: { address?: string }; marketCap?: number; fdv?: number; priceUsd?: string }>;
+        const now = Date.now();
+        const next = [...positionsRef.current];
+        let changed = false;
+        for (const position of open) {
+          const pair = pairs.find((x) => x.baseToken?.address === position.mint || x.quoteToken?.address === position.mint);
+          const mcUsd = typeof pair?.marketCap === "number" ? pair.marketCap : (typeof pair?.fdv === "number" ? pair.fdv : null);
+          if (!mcUsd || mcUsd <= 0) continue;
+          // We only need a consistent relative price proxy. The entry from the launch
+          // stream is denominated in SOL, so establish a USD->relative bridge on the
+          // first Dex observation instead of pretending USD market cap equals SOL MC.
+          const idx = next.findIndex((p) => p.mint === position.mint && p.status === "open");
+          if (idx < 0) continue;
+          const p = next[idx];
+          const existingDexTick = p.ticks.find((t) => t.side === "other" && (t as SniperTick & { dexUsd?: number }).dexUsd != null) as (SniperTick & { dexUsd?: number }) | undefined;
+          const anchorUsd = existingDexTick?.dexUsd;
+          const relativeMc = anchorUsd && anchorUsd > 0 ? p.entryMarketCapSol * (mcUsd / anchorUsd) : p.currentMarketCapSol;
+          const tick = { t: now, marketCapSol: relativeMc, side: "other" as const, dexUsd: mcUsd } as SniperTick & { dexUsd: number };
+          const base = { ...p, ticks: [...p.ticks, tick].slice(-80), tradeCount: p.tradeCount + 1 };
+          if (!anchorUsd) {
+            next[idx] = base;
+            changed = true;
+            continue;
+          }
+          const evaluated = evaluatePaperTick(base, relativeMc, "other", now);
+          next[idx] = evaluated.reason ? { ...evaluated.updated, status: "closed" as const, closedAt: now, exitReason: evaluated.reason } : evaluated.updated;
+          changed = true;
+        }
+        if (changed) {
+          positionsRef.current = next;
+          setSniperPositions(next);
+        }
+      } catch {
+        // Keep UI alive; next interval retries.
+      } finally {
+        busy = false;
+      }
+    };
+    poll();
+    const id = window.setInterval(poll, 2_500);
+    return () => { stopped = true; window.clearInterval(id); };
+  }, [streamState, streamSource]);
 
   useEffect(() => {
     let stop = false;
@@ -380,7 +533,7 @@ export default function LaunchRadar() {
     </div>
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h3 className="font-display text-base font-semibold">🤖 Auto Paper Sniper</h3><p className="text-[10px] text-[var(--text-faint)]">$10 virtuales · máximo 5 posiciones · sigue trades en tiempo real y vende virtualmente al detectar reversión. Cero wallet, cero SOL.</p></div>
+        <div><h3 className="font-display text-base font-semibold">🤖 Auto Paper Sniper</h3><p className="text-[10px] text-[var(--text-faint)]">$10 virtuales · máximo 5 posiciones · usa trades en tiempo real cuando PumpDev está disponible; si no, activa monitor de precio DexScreener. Cero wallet, cero SOL.</p></div>
         <button onClick={() => setAutoPaper((v) => !v)} className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${autoPaper ? "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]" : "border-[var(--border)] text-[var(--text-muted)]"}`}>{autoPaper ? "● AUTO PAPER ON" : "○ AUTO PAPER OFF"}</button>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
@@ -389,7 +542,7 @@ export default function LaunchRadar() {
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">Win rate</div><b className="font-data text-lg">{sniperClosed.length ? `${((sniperWins / sniperClosed.length) * 100).toFixed(0)}%` : "N/D"}</b></div>
         <div className="rounded-lg bg-[var(--surface-2)] p-2"><div className="text-[var(--text-faint)]">PnL virtual</div><b className={`font-data text-lg ${sniperPnlUsd >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}`}>{sniperPnlUsd >= 0 ? "+" : ""}${sniperPnlUsd.toFixed(2)}</b></div>
       </div>
-      <div className="text-[10px] text-[var(--text-muted)]">Salida dinámica: hard stop −12%; trailing de ~6–12% desde el máximo según el tamaño del pump; sell pressure; no-momentum; máximo 90s. El PnL resta 3% de fricción estimada, pero NO puede reproducir exactamente slippage/liquidez reales.</div>
+      <div className="text-[10px] text-[var(--text-muted)]">Salida dinámica: hard stop −12%; trailing de ~6–12% desde el máximo; reversión; sell pressure cuando hay stream de trades; no-momentum; máximo 90s. Si aparece “PumpPortal fallback”, el Paper Sniper usa precio DexScreener cada ~2,5s y no finge conocer buy/sell pressure. El PnL resta 3% de fricción estimada.</div>
       {sniperOpen.length > 0 && <div className="grid lg:grid-cols-2 gap-2">{sniperOpen.map((p) => <div key={p.mint} className="rounded-xl border border-[var(--accent-info)]/30 bg-[var(--surface-2)] p-3">
         <div className="flex justify-between gap-2"><div><b>{p.name}</b> <span className="text-[var(--text-muted)]">${p.symbol}</span><div className="text-[9px] text-[var(--text-faint)]">PAPER · {Math.max(0, Math.floor((clock - p.openedAt)/1000))}s · {p.tradeCount} trades</div></div><div className={`font-data font-bold ${p.netReturnPct >= 0 ? "text-[var(--accent-opportunity)]" : "text-[var(--accent-risk)]"}`}>{pctText(p.netReturnPct)}</div></div>
         <div className="mt-2 grid grid-cols-3 gap-1 text-[10px]"><div>Peak <b className="text-[var(--accent-opportunity)]">{pctText(p.peakReturnPct)}</b></div><div>From peak <b className={p.drawdownFromPeakPct < 0 ? "text-[var(--accent-risk)]" : ""}>{pctText(p.drawdownFromPeakPct)}</b></div><div>B/S <b>{p.buys}/{p.sells}</b></div></div>
@@ -401,12 +554,12 @@ export default function LaunchRadar() {
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div><h3 className="font-display text-sm font-semibold">⚡ DIRECT LAUNCH STREAM · 0–5 MIN</h3><p className="text-[10px] text-[var(--text-faint)]">Aparecen al crearse; no esperamos a DexScreener.</p></div>
-        <div className="text-xs text-[var(--text-muted)]">Stream: <b className={streamState === "live" ? "text-[var(--accent-opportunity)]" : streamState === "offline" ? "text-[var(--accent-risk)]" : "text-[var(--accent-gold)]"}>{streamState === "live" ? "LIVE" : streamState === "offline" ? "OFFLINE" : "CONECTANDO"}</b> · <b>{instant.length}</b> lanzamientos</div>
+        <div className="text-right text-xs text-[var(--text-muted)]">Stream: <b className={streamState === "live" ? "text-[var(--accent-opportunity)]" : streamState === "offline" ? "text-[var(--accent-risk)]" : "text-[var(--accent-gold)]"}>{streamState === "live" ? "LIVE" : streamState === "offline" ? "OFFLINE" : "CONECTANDO"}</b>{streamSource ? <> · <b>{streamSource === "pumpdev" ? "PumpDev" : "PumpPortal fallback"}</b></> : null} · <b>{instant.length}</b> lanzamientos{streamError ? <div className="mt-0.5 max-w-md text-[9px] text-[var(--accent-risk)]">{streamError}</div> : null}</div>
       </div>
       {instant.length ? <div className="grid lg:grid-cols-2 gap-3">{instant.map((token) => <InstantCard key={token.mint} token={token} now={clock} paperOpen={sniperOpen.some((p) => p.mint === token.mint)} />)}</div> : <div className="rounded-xl border border-dashed border-[var(--border)] p-4 text-xs text-[var(--text-muted)]">{streamState === "live" ? "Stream conectado. Esperando el próximo token de Pump.fun…" : "Conectando al stream directo de nuevos tokens…"}</div>}
     </div>
     <div className="border-t border-[var(--border)] pt-4"><div className="mb-2 text-[10px] uppercase tracking-wider text-[var(--text-faint)]">DexScreener enrichment · cuando el par ya está indexado</div></div>
     {loading && !feed ? <div className="text-sm text-[var(--text-muted)]">Buscando lanzamientos…</div> : groups.map(([title, list]) => <div key={title} className="space-y-2"><div className="flex justify-between"><h3 className="font-display text-sm font-semibold">{title}</h3><span className="text-xs text-[var(--text-muted)]">{list.length}</span></div>{list.length ? <div className="grid lg:grid-cols-2 gap-3">{list.map(c => <LaunchCard key={c.tokenKey} c={c} />)}</div> : <div className="rounded-xl border border-dashed border-[var(--border)] p-4 text-xs text-[var(--text-muted)]">No hay ningún par confirmado por DexScreener en esta franja de edad ahora mismo. No es un filtro de volumen/liquidez: si existe un par ≤5m que nuestros feeds descubren, debería aparecer aquí.</div>}</div>)}
-    <div className="text-[10px] text-[var(--text-faint)]">V20: Direct Launch Stream + Auto Paper Sniper. Las operaciones del Sniper son simuladas en este navegador; no firma, compra ni vende tokens reales. DexScreener sigue siendo la capa de enriquecimiento posterior.</div>
+    <div className="text-[10px] text-[var(--text-faint)]">V20.1: Direct Launch Stream con fallback + Auto Paper Sniper. Las operaciones del Sniper son simuladas en este navegador; no firma, compra ni vende tokens reales. DexScreener sigue siendo la capa de enriquecimiento posterior.</div>
   </section>;
 }
