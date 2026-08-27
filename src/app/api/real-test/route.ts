@@ -124,7 +124,7 @@ export async function POST(req:NextRequest){
       const fraction=Math.min(.5,Math.max(.05,Number(process.env.REAL_BUY_FRACTION??DEFAULT_BUY_FRACTION)));
       const amountSol=Math.min(Math.max(0,wallet.balanceSol-reserve),wallet.balanceSol*fraction);
       if(amountSol<=.0005){ const s={...state,stopped:true,lastAction:"INSUFFICIENT BALANCE",lastError:"Saldo insuficiente para otra entrada + fees."}; await saveState(r,s); return NextResponse.json({ok:false,error:s.lastError,state:s},{status:409}); }
-      const balanceBeforeBuySol=wallet.sol;
+      const balanceBeforeBuySol=wallet.balanceSol;
       const sig=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"buy",mint,amount:amountSol,denominatedInSol:"true"}));
       const walletAfterBuy=await walletSnapshot(c,k);
       const nextEntries=state.entries+1;
@@ -141,7 +141,7 @@ export async function POST(req:NextRequest){
         openName:typeof body?.name==="string"?body.name:null,
         openSymbol:typeof body?.symbol==="string"?body.symbol:null,
         openOpenedAt:Date.now(),
-        openBalanceBeforeBuySol:balanceBeforeBuySol,openBalanceAfterBuySol:walletAfterBuy.sol,
+        openBalanceBeforeBuySol:balanceBeforeBuySol,openBalanceAfterBuySol:walletAfterBuy.balanceSol,
         lastAction:`BUY ${mint.slice(0,6)}… ${amountSol.toFixed(6)} SOL`,
         lastSignature:sig,lastError:null,startedAt:state.startedAt??Date.now()
       };
@@ -154,7 +154,7 @@ export async function POST(req:NextRequest){
       const reachedMax=state.entries>=MAX_ENTRIES;
       const before=Number(state.openBalanceBeforeBuySol);
       const afterBuy=Number(state.openBalanceAfterBuySol);
-      const pnl=Number.isFinite(before)?walletAfterSell.sol-before:0;
+      const pnl=Number.isFinite(before)?walletAfterSell.balanceSol-before:0;
       const spent=Number.isFinite(before)&&Number.isFinite(afterBuy)?Math.max(0,before-afterBuy):0;
       const tradeRet=spent>0?(pnl/spent)*100:null;
       const realized=(Number(state.realizedPnlSol)||0)+pnl;
