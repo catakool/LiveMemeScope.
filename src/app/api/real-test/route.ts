@@ -8,8 +8,10 @@ const MAX_ENTRIES = 20;
 const STATE_KEY = "memescope:real-test:v22";
 const DEFAULT_RESERVE_SOL = 0.003;
 const DEFAULT_BUY_FRACTION = 0.25;
-const DEFAULT_SLIPPAGE = 10;
+const DEFAULT_BUY_SLIPPAGE = 6;
+const DEFAULT_SELL_SLIPPAGE = 12;
 const DEFAULT_PRIORITY_FEE = 0.00005;
+const DEFAULT_MAX_BUY_COST_PCT = 5;
 
 type RealState = {
   entries:number;
@@ -26,6 +28,10 @@ type RealState = {
   wins?:number; losses?:number;
   lastTradePnlSol?:number|null;
   lastTradeReturnPct?:number|null;
+  lastPaperMirrorReturnPct?:number|null;
+  lastExecutionGapPct?:number|null;
+  skippedBuys?:number;
+  lastSkipReason?:string|null;
   lastAction:string|null;
   lastSignature:string|null;
   lastError:string|null;
@@ -34,6 +40,9 @@ type RealState = {
 const emptyState=():RealState=>({
   entries:0,openMint:null,stopped:false,armed:false,
   openEntryMarketCapSol:null,openName:null,openSymbol:null,openOpenedAt:null,
+  openBalanceBeforeBuySol:null,openBalanceAfterBuySol:null,
+  realizedPnlSol:0,wins:0,losses:0,lastTradePnlSol:null,lastTradeReturnPct:null,
+  lastPaperMirrorReturnPct:null,lastExecutionGapPct:null,skippedBuys:0,lastSkipReason:null,
   lastAction:null,lastSignature:null,lastError:null,startedAt:null
 });
 
@@ -65,21 +74,49 @@ async function getState(r:Redis){
     openBalanceAfterBuySol:raw.openBalanceAfterBuySol??null,
     realizedPnlSol:Number(raw.realizedPnlSol)||0,wins:Number(raw.wins)||0,losses:Number(raw.losses)||0,
     lastTradePnlSol:raw.lastTradePnlSol??null,lastTradeReturnPct:raw.lastTradeReturnPct??null,
+    lastPaperMirrorReturnPct:raw.lastPaperMirrorReturnPct??null,lastExecutionGapPct:raw.lastExecutionGapPct??null,
+    skippedBuys:Number(raw.skippedBuys)||0,lastSkipReason:raw.lastSkipReason??null,
   };
 }
 async function saveState(r:Redis,s:RealState){ await r.set(STATE_KEY,s); }
 async function walletSnapshot(c:Connection,k:Keypair){ const l=await c.getBalance(k.publicKey,"confirmed"); return {publicKey:k.publicKey.toBase58(),balanceSol:l/1e9}; }
 async function portalTx(a:{publicKey:string;action:"buy"|"sell";mint:string;amount:number|string;denominatedInSol:"true"|"false"}){
+  const slippage=a.action==="buy"
+    ? Number(process.env.REAL_BUY_SLIPPAGE_PCT??process.env.REAL_SLIPPAGE_PCT??DEFAULT_BUY_SLIPPAGE)
+    : Number(process.env.REAL_SELL_SLIPPAGE_PCT??process.env.REAL_SLIPPAGE_PCT??DEFAULT_SELL_SLIPPAGE);
   const response=await fetch("https://pumpportal.fun/api/trade-local",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
-    ...a,slippage:Number(process.env.REAL_SLIPPAGE_PCT??DEFAULT_SLIPPAGE),priorityFee:Number(process.env.REAL_PRIORITY_FEE_SOL??DEFAULT_PRIORITY_FEE),pool:"auto"
+    ...a,slippage,priorityFee:Number(process.env.REAL_PRIORITY_FEE_SOL??DEFAULT_PRIORITY_FEE),pool:"auto"
   })});
   if(!response.ok) throw new Error(`PumpPortal ${response.status}: ${(await response.text()).slice(0,180)}`);
   return new Uint8Array(await response.arrayBuffer());
 }
-async function signAndSend(c:Connection,k:Keypair,b:Uint8Array){
-  const tx=VersionedTransaction.deserialize(b); tx.sign([k]);
+async function signAndSend(c:Connection,k:Keypair,b:Uint8Array,opts?:{buyAmountSol?:number}){
+  const tx=VersionedTransaction.deserialize(b);
+  tx.sign([k]);
+
+  // Economic preflight: simulate the exact signed transaction immediately before
+  // sending it. A pump that already ran away is skipped rather than chased.
+  const sim=await c.simulateTransaction(tx,{sigVerify:false,commitment:"processed"});
+  if(sim.value.err){
+    const logs=(sim.value.logs??[]).slice(-8).join(" | ");
+    throw new Error(`PREBUY_SKIP simulation failed: ${JSON.stringify(sim.value.err)} ${logs}`.slice(0,900));
+  }
+
+  const feeInfo=await c.getFeeForMessage(tx.message,"confirmed");
+  const baseFeeSol=(feeInfo.value??0)/1e9;
+  const priorityFeeSol=Number(process.env.REAL_PRIORITY_FEE_SOL??DEFAULT_PRIORITY_FEE);
+  const estimatedExecutionCostSol=baseFeeSol+priorityFeeSol;
+  if(opts?.buyAmountSol && opts.buyAmountSol>0){
+    const costPct=(estimatedExecutionCostSol/opts.buyAmountSol)*100;
+    const maxCostPct=Number(process.env.REAL_MAX_BUY_COST_PCT??DEFAULT_MAX_BUY_COST_PCT);
+    if(Number.isFinite(costPct)&&costPct>maxCostPct){
+      throw new Error(`PREBUY_SKIP execution cost ${costPct.toFixed(2)}% > ${maxCostPct.toFixed(2)}% limit`);
+    }
+  }
+
   const sig=await c.sendTransaction(tx,{skipPreflight:false,maxRetries:3});
-  await c.confirmTransaction(sig,"confirmed"); return sig;
+  await c.confirmTransaction(sig,"confirmed");
+  return {sig,estimatedExecutionCostSol};
 }
 
 export async function GET(req:NextRequest){
@@ -125,7 +162,19 @@ export async function POST(req:NextRequest){
       const amountSol=Math.min(Math.max(0,wallet.balanceSol-reserve),wallet.balanceSol*fraction);
       if(amountSol<=.0005){ const s={...state,stopped:true,lastAction:"INSUFFICIENT BALANCE",lastError:"Saldo insuficiente para otra entrada + fees."}; await saveState(r,s); return NextResponse.json({ok:false,error:s.lastError,state:s},{status:409}); }
       const balanceBeforeBuySol=wallet.balanceSol;
-      const sig=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"buy",mint,amount:amountSol,denominatedInSol:"true"}));
+      let sent:{sig:string;estimatedExecutionCostSol:number};
+      try{
+        sent=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"buy",mint,amount:amountSol,denominatedInSol:"true"}),{buyAmountSol:amountSol});
+      }catch(e){
+        const message=e instanceof Error?e.message:"BUY preflight failed";
+        if(/PREBUY_SKIP|TooMuchSolRequired|\b6002\b|0x1772|slippage.*too much sol|required to buy/i.test(message)){
+          const skipped={...state,skippedBuys:(Number(state.skippedBuys)||0)+1,lastSkipReason:message.slice(0,240),lastAction:`SKIP ${mint.slice(0,6)}… · execution/preflight`,lastError:null};
+          await saveState(r,skipped);
+          return NextResponse.json({ok:false,skip:true,error:"SKIP_TOKEN",reason:message,state:skipped},{status:422});
+        }
+        throw e;
+      }
+      const sig=sent.sig;
       const walletAfterBuy=await walletSnapshot(c,k);
       const nextEntries=state.entries+1;
       const entryMc=Number(body?.entryMarketCapSol);
@@ -149,7 +198,8 @@ export async function POST(req:NextRequest){
     }
     if(action==="sell"){
       if(state.openMint!==mint) return NextResponse.json({ok:false,error:"Ese mint no es la posición real abierta."},{status:409});
-      const sig=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"sell",mint,amount:"100%",denominatedInSol:"false"}));
+      const sold=await signAndSend(c,k,await portalTx({publicKey:wallet.publicKey,action:"sell",mint,amount:"100%",denominatedInSol:"false"}));
+      const sig=sold.sig;
       const walletAfterSell=await walletSnapshot(c,k);
       const reachedMax=state.entries>=MAX_ENTRIES;
       const before=Number(state.openBalanceBeforeBuySol);
@@ -159,9 +209,14 @@ export async function POST(req:NextRequest){
       const tradeRet=spent>0?(pnl/spent)*100:null;
       const realized=(Number(state.realizedPnlSol)||0)+pnl;
       const wins=(Number(state.wins)||0)+(pnl>0?1:0), losses=(Number(state.losses)||0)+(pnl<0?1:0);
+      const paperExitMc=Number(body?.paperExitMarketCapSol);
+      const paperEntryMc=Number(state.openEntryMarketCapSol);
+      const paperMirrorReturn=paperEntryMc>0&&paperExitMc>0?((paperExitMc/paperEntryMc)-1)*100:null;
+      const executionGap=paperMirrorReturn!=null&&tradeRet!=null?tradeRet-paperMirrorReturn:null;
       const s:RealState={
         ...state,openMint:null,openEntryMarketCapSol:null,openName:null,openSymbol:null,openOpenedAt:null,
         openBalanceBeforeBuySol:null,openBalanceAfterBuySol:null,realizedPnlSol:realized,wins,losses,lastTradePnlSol:pnl,lastTradeReturnPct:tradeRet,
+        lastPaperMirrorReturnPct:paperMirrorReturn,lastExecutionGapPct:executionGap,
         armed:reachedMax?false:Boolean(state.armed),stopped:reachedMax,
         lastAction:`SELL ${mint.slice(0,6)}… · REAL ${pnl>=0?"+":""}${pnl.toFixed(6)} SOL${reachedMax?` · MAX ${MAX_ENTRIES} COMPLETE`:""}`,
         lastSignature:sig,lastError:null

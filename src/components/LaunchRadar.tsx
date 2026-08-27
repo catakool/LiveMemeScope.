@@ -258,6 +258,7 @@ export default function LaunchRadar() {
   const realOpenMintRef = useRef<string | null>(null);
   const realExitPendingRef = useRef(false);
   const realExitReasonRef = useRef("autonomous_recovery");
+  const realExitMarketCapRef = useRef<number | null>(null);
   const positionsRef = useRef<PaperSniperPosition[]>([]);
   const autoPaperRef = useRef(true);
   const wsRef = useRef<WebSocket | null>(null);
@@ -311,7 +312,10 @@ export default function LaunchRadar() {
       cache: "no-store",
     });
     const data = await response.json();
-    if (!response.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${response.status}`);
+    if (!response.ok || !data?.ok) {
+      if (data?.skip) throw new Error(`SKIP_TOKEN · ${data?.reason ?? data?.error ?? "preflight"}`);
+      throw new Error(data?.error ?? `HTTP ${response.status}`);
+    }
     setRealStatus(data);
     realOpenMintRef.current = data?.state?.openMint ?? null;
     if (typeof data?.state?.armed === "boolean") {
@@ -387,11 +391,11 @@ export default function LaunchRadar() {
     } catch (e) {
       const message = e instanceof Error ? e.message : "BUY real falló";
       const transientSlippage =
-        /TooMuchSolRequired|\b6002\b|0x1772|slippage.*too much sol|required to buy/i.test(message);
+        /SKIP_TOKEN|PREBUY_SKIP|TooMuchSolRequired|\b6002\b|0x1772|slippage.*too much sol|required to buy/i.test(message);
       if (transientSlippage) {
         // The token ran away before execution. Do NOT chase it and do NOT stop
         // the experiment: skip this mint and wait for the next launch.
-        setRealError("SKIP TOKEN · preço/slippage fugiu antes do BUY. Bot continua ARMED.");
+        setRealError("SKIP TOKEN · preflight/custo/slippage não passou. Bot continua ARMED.");
       } else {
         setRealError(message);
         // Unknown execution/config errors still fail closed.
@@ -404,18 +408,37 @@ export default function LaunchRadar() {
     }
   };
 
-  const realSellIfOpen = async (mint: string, reason: string) => {
+  const maybeEnterReal = (p: PaperSniperPosition) => {
+    if (!realArmedRef.current || realBusyRef.current || realOpenMintRef.current) return;
+    if (!hasValidPaperData(p)) return;
+    const ageMs = Date.now() - p.openedAt;
+    const ticks = p.ticks.slice(-5);
+    if (ticks.length < 3) return;
+    const recentMove = ret(ticks[Math.max(0, ticks.length - 3)].marketCapSol, p.currentMarketCapSol);
+    const directionalTrades = p.buys + p.sells;
+    const buyRatio = directionalTrades > 0 ? p.buys / directionalTrades : null;
+    const earlyEnough = ageMs >= 1_500 && ageMs <= 20_000;
+    const moving = p.grossReturnPct >= 2 && p.grossReturnPct <= 35 && recentMove >= 0.8;
+    const notReversing = p.drawdownFromPeakPct > -4;
+    const pressureOk = buyRatio == null ? recentMove >= 1.5 : p.buys >= 2 && buyRatio >= 0.58;
+    if (!earlyEnough || !moving || !notReversing || !pressureOk) return;
+    void realBuyIfArmed(p.mint, p.currentMarketCapSol, p.name, p.symbol);
+  };
+
+  const realSellIfOpen = async (mint: string, reason: string, paperExitMarketCapSol?: number | null) => {
     if (realOpenMintRef.current !== mint || realBusyRef.current) return;
     realExitPendingRef.current = true;
     realExitReasonRef.current = reason || "autonomous_exit";
+    if (paperExitMarketCapSol && paperExitMarketCapSol > 0) realExitMarketCapRef.current = paperExitMarketCapSol;
     try {
       realBusyRef.current=true;
       setRealBusy(true);
       setRealError(null);
-      const data = await realRequest("POST", { action: "sell", mint, reason });
+      const data = await realRequest("POST", { action: "sell", mint, reason, paperExitMarketCapSol: realExitMarketCapRef.current });
       realOpenMintRef.current = data?.state?.openMint ?? null;
       if (!realOpenMintRef.current) {
         realExitPendingRef.current = false;
+        realExitMarketCapRef.current = null;
       }
       if (data?.state?.stopped) {
         realArmedRef.current = false;
@@ -445,7 +468,7 @@ export default function LaunchRadar() {
     const id = window.setInterval(() => {
       const mint = realOpenMintRef.current;
       if (!mint || !realExitPendingRef.current || realBusyRef.current) return;
-      void realSellIfOpen(mint, realExitReasonRef.current || "autonomous_retry");
+      void realSellIfOpen(mint, realExitReasonRef.current || "autonomous_retry", realExitMarketCapRef.current);
     }, 4_000);
     return () => window.clearInterval(id);
   }, [realToken]);
@@ -481,7 +504,8 @@ export default function LaunchRadar() {
     if (!closed) return;
     positionsRef.current = next;
     setSniperPositions(next);
-    if (reason !== "no_data") void realSellIfOpen(mint, reason);
+    const closedPosition = next.find((p) => p.mint === mint);
+    if (reason !== "no_data") void realSellIfOpen(mint, reason, closedPosition?.currentMarketCapSol ?? atMarketCap ?? null);
     try { wsRef.current?.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] })); } catch {}
   };
 
@@ -659,9 +683,7 @@ export default function LaunchRadar() {
                 const next = [p, ...positionsRef.current].slice(0, 120);
                 positionsRef.current = next;
                 setSniperPositions(next);
-                // REAL TEST mirrors only the first paper position while armed.
-                // Server enforces 1 open position + 20-entry hard cap.
-                void realBuyIfArmed(mint, mc, token.name, token.symbol);
+                // V24 REAL waits for confirmed momentum; no blind BUY at creation.
                 if (provider.supportsTrades) {
                   ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
                 } else if (tradeWsRef.current?.readyState === WebSocket.OPEN) {
@@ -690,6 +712,7 @@ export default function LaunchRadar() {
                 const next = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
                 positionsRef.current = next;
                 setSniperPositions(next);
+                maybeEnterReal(updated);
               }
             }
           } catch (error) {
@@ -762,6 +785,7 @@ export default function LaunchRadar() {
         const next = positionsRef.current.map((p) => p.mint === mint && p.status === "open" ? updated : p);
         positionsRef.current = next;
         setSniperPositions(next);
+                maybeEnterReal(updated);
       }
     };
 
@@ -854,6 +878,7 @@ export default function LaunchRadar() {
             };
           } else {
             next[idx] = evaluated.updated;
+            maybeEnterReal(evaluated.updated);
           }
           changed = true;
         }
@@ -901,6 +926,9 @@ export default function LaunchRadar() {
   const trimmedTrades = [...sniperValid].sort((a,b) => b.netReturnPct - a.netReturnPct).slice(trimCount);
   const pnlWithoutTop1Pct = trimmedTrades.reduce((sum,p) => sum + paperTradePnlUsd(p), 0);
   const topTradeShare = sniperPnlUsd > 0 && bestTrade ? (paperTradePnlUsd(bestTrade) / sniperPnlUsd) * 100 : null;
+  const realTrackedPosition = realStatus?.state?.openMint
+    ? sniperPositions.find((p) => p.mint === realStatus.state.openMint && p.status === "open") ?? null
+    : null;
   return <section className="space-y-5">
     <div className="rounded-2xl border border-[var(--accent-info)]/35 bg-[var(--surface)] p-5">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-display text-xl font-semibold">⚡ Launch Radar</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Solo Solana · primeros 5 minutos. Ya no escondemos un lanzamiento por tener poco volumen o liquidez: primero lo ves, después decides si está despertando.</p></div><div className="text-right text-xs text-[var(--text-muted)]"><div className="font-data text-sm"><b>{launch.length}</b> pares &lt;5m</div><div>escaneados: <b>{feed?.scannedTokens ?? 0}</b></div></div></div>
@@ -908,7 +936,7 @@ export default function LaunchRadar() {
     </div>
     <div className="rounded-2xl border border-[var(--accent-risk)]/35 bg-[var(--surface)] p-4 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><h3 className="font-display text-base font-semibold">🧨 V22 REAL TEST · HOT WALLET AISLADA</h3><p className="text-[10px] text-[var(--text-muted)]">Máximo 20 BUY reales · 1 posición simultánea · reutiliza únicamente el saldo de la wallet experimental · el servidor se detiene al llegar a 20 o quedarse sin saldo operativo.</p></div>
+        <div><h3 className="font-display text-base font-semibold">🧠 V24 REAL EDGE · AUTONOMOUS MANAGER</h3><p className="text-[10px] text-[var(--text-muted)]">Máximo 20 BUY reales · 1 posição · só entra após confirmação curta de momentum + preflight económico. Sai autonomamente por trailing/stop/reversão e mede Paper vs Real.</p></div>
         <div className={`font-data text-xs font-bold ${realArmed ? "text-[var(--accent-risk)]" : "text-[var(--text-muted)]"}`}>{realArmed ? "● ARMED" : "○ SAFE / OFF"}</div>
       </div>
       <div className="grid md:grid-cols-[1fr_auto_auto] gap-2">
@@ -922,12 +950,30 @@ export default function LaunchRadar() {
           }catch(e){setRealError(e instanceof Error?e.message:"No se pudo cambiar ARMED");}
         }} className={`rounded-lg border px-3 py-2 text-xs font-bold ${realArmed ? "border-[var(--accent-risk)] text-[var(--accent-risk)]" : "border-[var(--accent-opportunity)]/50 text-[var(--accent-opportunity)]"} disabled:opacity-40`}>{realArmed ? "DESARMAR" : "ARM REAL TEST"}</button>
       </div>
-      {realStatus?.ok && <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[10px]">
-        <div className="rounded bg-[var(--surface-2)] p-2">Wallet<div className="font-data">{realStatus.wallet?.publicKey?.slice(0,6)}…{realStatus.wallet?.publicKey?.slice(-4)}</div></div>
-        <div className="rounded bg-[var(--surface-2)] p-2">Saldo SOL<div className="font-data font-bold">{Number(realStatus.wallet?.balanceSol ?? 0).toFixed(5)}</div></div>
-        <div className="rounded bg-[var(--surface-2)] p-2">Entradas<div className="font-data font-bold">{realStatus.state?.entries ?? 0}/20</div></div>
-        <div className="rounded bg-[var(--surface-2)] p-2">Posición<div className="font-data">{realStatus.state?.openMint ? `${String(realStatus.state.openMint).slice(0,6)}…` : "ninguna"}</div></div>
-        <div className="rounded bg-[var(--surface-2)] p-2">Compra/entrada<div className="font-data">{Math.round(Number(realStatus.buyFraction ?? .25)*100)}% saldo</div></div>
+      {realStatus?.ok && <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
+        <div className="rounded bg-[var(--surface-2)] p-2">Saldo SOL<div className="font-data font-bold">{Number(realStatus.wallet?.balanceSol ?? 0).toFixed(5)}</div><div className="text-[9px] text-[var(--text-faint)]">{realStatus.wallet?.publicKey?.slice(0,6)}…{realStatus.wallet?.publicKey?.slice(-4)}</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">Entradas<div className="font-data font-bold">{realStatus.state?.entries ?? 0}/20</div><div className="text-[9px] text-[var(--text-faint)]">skips: {Number(realStatus.state?.skippedBuys)||0}</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">Compra/entrada<div className="font-data font-bold">{Math.round(Number(realStatus.buyFraction ?? .25)*100)}% saldo</div><div className="text-[9px] text-[var(--text-faint)]">preflight antes do envio</div></div>
+        <div className="rounded bg-[var(--surface-2)] p-2">PnL REAL<div className={`font-data font-bold ${(Number(realStatus.state?.realizedPnlSol)||0)>=0?"text-[var(--accent-opportunity)]":"text-[var(--accent-risk)]"}`}>{(Number(realStatus.state?.realizedPnlSol)||0)>=0?"+":""}{(Number(realStatus.state?.realizedPnlSol)||0).toFixed(6)} SOL</div><div className="text-[9px] text-[var(--text-faint)]">W/L {Number(realStatus.state?.wins)||0}/{Number(realStatus.state?.losses)||0}</div></div>
+      </div>}
+      {realStatus?.state?.openMint && <div className="rounded-xl border border-[var(--accent-risk)]/35 bg-[var(--surface-2)] p-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div><div className="text-[9px] font-semibold text-[var(--accent-risk)]">● REAL POSITION · MANAGED AUTOMATICALLY</div><b>{realStatus.state?.openName || realTrackedPosition?.name || "Token real"}</b> <span className="text-[var(--text-muted)]">${realStatus.state?.openSymbol || realTrackedPosition?.symbol || "?"}</span><div className="font-data text-[9px] text-[var(--text-faint)]">{String(realStatus.state.openMint)}</div></div>
+          <div className="text-right"><div className="text-[9px] text-[var(--text-faint)]">estado</div><b className="text-[var(--accent-opportunity)]">{realExitPendingRef.current ? "SELL RETRY" : "MONITORING"}</b></div>
+        </div>
+        <div className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
+          <div>Paper desde entry real<div className="font-data font-semibold">{realTrackedPosition && Number(realStatus.state?.openEntryMarketCapSol)>0 ? pctText(ret(Number(realStatus.state.openEntryMarketCapSol), realTrackedPosition.currentMarketCapSol)) : "a validar"}</div></div>
+          <div>Peak monitor<div className="font-data font-semibold">{realTrackedPosition ? pctText(realTrackedPosition.peakReturnPct) : "a validar"}</div></div>
+          <div>Idade<div className="font-data font-semibold">{realStatus.state?.openOpenedAt ? `${Math.max(0,Math.floor((clock-Number(realStatus.state.openOpenedAt))/1000))}s` : "—"}</div></div>
+        </div>
+      </div>}
+      {realStatus?.ok && <div className="rounded-xl border border-[var(--accent-info)]/25 bg-[var(--surface-2)] p-3 text-[10px]">
+        <b>Paper ↔ Real · última saída</b>
+        <div className="mt-1 grid grid-cols-3 gap-2">
+          <div>Paper mirror<div className="font-data">{realStatus.state?.lastPaperMirrorReturnPct == null ? "N/D" : pctText(Number(realStatus.state.lastPaperMirrorReturnPct))}</div></div>
+          <div>Real líquido<div className="font-data">{realStatus.state?.lastTradeReturnPct == null ? "N/D" : pctText(Number(realStatus.state.lastTradeReturnPct))}</div></div>
+          <div>Execution gap<div className={`font-data ${Number(realStatus.state?.lastExecutionGapPct)<0?"text-[var(--accent-risk)]":"text-[var(--accent-opportunity)]"}`}>{realStatus.state?.lastExecutionGapPct == null ? "N/D" : pctText(Number(realStatus.state.lastExecutionGapPct))}</div></div>
+        </div>
       </div>}
       <div className="flex flex-wrap gap-2">
         <button onClick={async()=>{ try{ const data=await realRequest("POST",{action:"stop"}); realArmedRef.current=false; setRealArmed(false); setRealStatus(data); }catch(e){setRealError(e instanceof Error?e.message:"Error");}}} className="rounded-lg border border-[var(--accent-risk)] px-3 py-1.5 text-xs font-bold text-[var(--accent-risk)]">■ KILL SWITCH</button>
@@ -941,7 +987,7 @@ export default function LaunchRadar() {
       </div>
       {realStatus?.state?.lastAction && <div className="text-[10px] text-[var(--text-muted)]">Última acción: <b>{realStatus.state.lastAction}</b></div>}
       {(realError || realStatus?.state?.lastError) && <div className="rounded-lg border border-[var(--accent-risk)]/40 bg-[var(--accent-risk)]/5 p-2 text-[10px] text-[var(--accent-risk)]">{realError ?? realStatus.state.lastError}</div>}
-      <div className="text-[9px] text-[var(--text-faint)]">V23.2 AUTONOMOUS: posições órfãs são fechadas automaticamente; SELL falhado entra em retry automático; BUY com slippage 6002 é ignorado e o bot segue para a próxima moeda. PnL REAL mede o delta da wallet BUY→SELL incluindo fees. ARMED queda persistido en Redis, una posición abierta se recupera tras refrescar la página y SELL sigue permitido aunque el Kill Switch esté activo. La private key nunca se envía al navegador. `priorityFee` por defecto = 0.00005 SOL; Solscan puede abreviar los ceros con subíndices.</div>
+      <div className="text-[9px] text-[var(--text-faint)]">V24 REAL EDGE: não compra no nascimento. Espera 3+ observações e momentum confirmado, evita entradas já esticadas/revertendo, simula a transação antes de enviar, rejeita custo de execução excessivo e ignora slippage runaway. Posições órfãs fecham automaticamente e SELL falhado entra em retry. PnL REAL mede o delta da wallet BUY→SELL incluindo fees. ARMED queda persistido en Redis, una posición abierta se recupera tras refrescar la página y SELL sigue permitido aunque el Kill Switch esté activo. La private key nunca se envía al navegador. `priorityFee` por defecto = 0.00005 SOL; Solscan puede abreviar los ceros con subíndices.</div>
     </div>
 
     <div className="rounded-2xl border border-[var(--accent-opportunity)]/30 bg-[var(--surface)] p-4 space-y-3">
