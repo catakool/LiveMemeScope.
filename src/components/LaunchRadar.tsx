@@ -90,9 +90,107 @@ function LaunchCard({ c }: { c: RadarCandidate }) {
   </article>;
 }
 
+
+type InstantLaunch = {
+  mint: string;
+  name: string;
+  symbol: string;
+  createdAt: number;
+  solAmount: number | null;
+  marketCapSol: number | null;
+};
+
+function InstantCard({ token, now }: { token: InstantLaunch; now: number }) {
+  const seconds = Math.max(0, Math.floor((now - token.createdAt) / 1000));
+  const ageText = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return <article className="rounded-xl border border-[var(--accent-opportunity)]/40 bg-[var(--surface)] p-4 space-y-3">
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-[var(--accent-opportunity)]/45 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-opportunity)]">⚡ LIVE CREATE</span>
+          <b className="truncate">{token.name || "Nuevo token"}</b>
+          <span className="text-xs text-[var(--text-muted)]">${token.symbol || "?"}</span>
+        </div>
+        <div className="mt-1 text-[11px] text-[var(--text-faint)]">Creado hace <b className="text-[var(--text)]">{ageText}</b> · detectado sin esperar a DexScreener</div>
+      </div>
+      <div className="font-data text-lg font-bold text-[var(--accent-opportunity)]">{seconds < 60 ? "NEW" : "<5m"}</div>
+    </div>
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+      <div className="rounded-lg bg-[var(--surface-2)] p-2"><span className="text-[var(--text-faint)]">Initial buy</span><div className="font-data font-semibold">{token.solAmount == null ? "N/D" : `${token.solAmount.toFixed(3)} SOL`}</div></div>
+      <div className="rounded-lg bg-[var(--surface-2)] p-2"><span className="text-[var(--text-faint)]">Market cap</span><div className="font-data font-semibold">{token.marketCapSol == null ? "N/D" : `${token.marketCapSol.toFixed(1)} SOL`}</div></div>
+      <div className="rounded-lg bg-[var(--surface-2)] p-2"><span className="text-[var(--text-faint)]">DEX data</span><div className="font-semibold text-[var(--accent-gold)]">esperando…</div></div>
+    </div>
+    <div className="rounded-lg bg-[var(--surface-2)] p-2 text-[10px] text-[var(--text-muted)]">Recién creado ≠ buena compra. Todavía puede no haber datos suficientes de liquidez, ventas o seguridad.</div>
+    <div className="flex flex-wrap gap-2">
+      <a href={`https://pump.fun/coin/${token.mint}`} target="_blank" rel="noreferrer" className="rounded-lg border border-[var(--accent-opportunity)]/40 px-3 py-1.5 text-xs text-[var(--accent-opportunity)]">Pump.fun ↗</a>
+      <a href={`https://jup.ag/swap/SOL-${token.mint}`} target="_blank" rel="noreferrer" className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--accent-info)]">Jupiter ↗</a>
+      <a href={`https://solscan.io/token/${token.mint}`} target="_blank" rel="noreferrer" className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--text-muted)]">Solscan ↗</a>
+    </div>
+  </article>;
+}
+
 export default function LaunchRadar() {
   const [feed, setFeed] = useState<RadarFeed | null>(null);
   const [loading, setLoading] = useState(true);
+  const [instant, setInstant] = useState<InstantLaunch[]>([]);
+  const [streamState, setStreamState] = useState<"connecting" | "live" | "offline">("connecting");
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setClock(now);
+      setInstant((items) => items.filter((x) => now - x.createdAt <= 5 * 60_000));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnect: number | null = null;
+    let stopped = false;
+    const connect = () => {
+      if (stopped) return;
+      setStreamState("connecting");
+      try {
+        ws = new WebSocket("wss://pumpdev.io/ws");
+        ws.onopen = () => {
+          setStreamState("live");
+          ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
+        };
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(String(event.data));
+            const mint = typeof msg?.mint === "string" ? msg.mint : "";
+            if (!mint || msg?.txType !== "create") return;
+            const token: InstantLaunch = {
+              mint,
+              name: typeof msg?.name === "string" ? msg.name : "Nuevo token",
+              symbol: typeof msg?.symbol === "string" ? msg.symbol : "?",
+              createdAt: Date.now(),
+              solAmount: typeof msg?.solAmount === "number" ? msg.solAmount : (typeof msg?.quoteAmount === "number" ? msg.quoteAmount : null),
+              marketCapSol: typeof msg?.marketCapSol === "number" ? msg.marketCapSol : null,
+            };
+            setInstant((items) => [token, ...items.filter((x) => x.mint !== mint)].slice(0, 80));
+          } catch {}
+        };
+        ws.onerror = () => setStreamState("offline");
+        ws.onclose = () => {
+          setStreamState("offline");
+          if (!stopped) reconnect = window.setTimeout(connect, 3_000);
+        };
+      } catch {
+        setStreamState("offline");
+        reconnect = window.setTimeout(connect, 3_000);
+      }
+    };
+    connect();
+    return () => {
+      stopped = true;
+      if (reconnect !== null) window.clearTimeout(reconnect);
+      ws?.close();
+    };
+  }, []);
+
   useEffect(() => {
     let stop = false;
     const load = () => fetch("/api/radar", { cache: "no-store" }).then(r => r.json()).then(j => { if (!stop) setFeed(j); }).finally(() => { if (!stop) setLoading(false); });
@@ -109,7 +207,15 @@ export default function LaunchRadar() {
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-display text-xl font-semibold">⚡ Launch Radar</h2><p className="mt-1 text-xs text-[var(--text-muted)]">Solo Solana · primeros 5 minutos. Ya no escondemos un lanzamiento por tener poco volumen o liquidez: primero lo ves, después decides si está despertando.</p></div><div className="text-right text-xs text-[var(--text-muted)]"><div className="font-data text-sm"><b>{launch.length}</b> pares &lt;5m</div><div>escaneados: <b>{feed?.scannedTokens ?? 0}</b></div></div></div>
       <div className="mt-3 rounded-lg bg-[var(--surface-2)] p-2 text-[10px] text-[var(--text-muted)]">⚪ NEW → 🟡 WARMING UP → 🟢 ACCELERATING → 🔥 LAUNCHING. Launch Velocity ordena y describe; ya no elimina tokens recién nacidos. Riesgos críticos se marcan como 🔴 DANGER.</div>
     </div>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div><h3 className="font-display text-sm font-semibold">⚡ DIRECT LAUNCH STREAM · 0–5 MIN</h3><p className="text-[10px] text-[var(--text-faint)]">Aparecen al crearse; no esperamos a DexScreener.</p></div>
+        <div className="text-xs text-[var(--text-muted)]">Stream: <b className={streamState === "live" ? "text-[var(--accent-opportunity)]" : streamState === "offline" ? "text-[var(--accent-risk)]" : "text-[var(--accent-gold)]"}>{streamState === "live" ? "LIVE" : streamState === "offline" ? "OFFLINE" : "CONECTANDO"}</b> · <b>{instant.length}</b> lanzamientos</div>
+      </div>
+      {instant.length ? <div className="grid lg:grid-cols-2 gap-3">{instant.map((token) => <InstantCard key={token.mint} token={token} now={clock} />)}</div> : <div className="rounded-xl border border-dashed border-[var(--border)] p-4 text-xs text-[var(--text-muted)]">{streamState === "live" ? "Stream conectado. Esperando el próximo token de Pump.fun…" : "Conectando al stream directo de nuevos tokens…"}</div>}
+    </div>
+    <div className="border-t border-[var(--border)] pt-4"><div className="mb-2 text-[10px] uppercase tracking-wider text-[var(--text-faint)]">DexScreener enrichment · cuando el par ya está indexado</div></div>
     {loading && !feed ? <div className="text-sm text-[var(--text-muted)]">Buscando lanzamientos…</div> : groups.map(([title, list]) => <div key={title} className="space-y-2"><div className="flex justify-between"><h3 className="font-display text-sm font-semibold">{title}</h3><span className="text-xs text-[var(--text-muted)]">{list.length}</span></div>{list.length ? <div className="grid lg:grid-cols-2 gap-3">{list.map(c => <LaunchCard key={c.tokenKey} c={c} />)}</div> : <div className="rounded-xl border border-dashed border-[var(--border)] p-4 text-xs text-[var(--text-muted)]">No hay ningún par confirmado por DexScreener en esta franja de edad ahora mismo. No es un filtro de volumen/liquidez: si existe un par ≤5m que nuestros feeds descubren, debería aparecer aquí.</div>}</div>)}
-    <div className="text-[10px] text-[var(--text-faint)]">Discovery: DexScreener latest profiles/boosts + mints recientes de Pump.fun como fuente suplementaria. Un mint de Pump.fun solo aparece cuando DexScreener confirma que ya existe un par. Aun así, la API pública de DexScreener no garantiza un stream completo de todos los pares de Solana.</div>
+    <div className="text-[10px] text-[var(--text-faint)]">Discovery V19.3: DIRECT LAUNCH STREAM recibe creaciones en tiempo real sin esperar a DexScreener. El bloque inferior usa DexScreener para añadir precio, trades, volumen, liquidez y Security cuando esos datos estén indexados.</div>
   </section>;
 }
